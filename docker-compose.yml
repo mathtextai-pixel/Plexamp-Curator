@@ -1,0 +1,21 @@
+services:
+  crate-excavator:
+    build: .
+    image: crate-excavator:latest
+    container_name: crate-excavator
+    restart: unless-stopped
+    ports:
+      - "5050:5050"
+    env_file:
+      - .env
+    environment:
+      - PLEX_URL=http://host.docker.internal:32400
+      - TAUTULLI_URL=http://host.docker.internal:8181
+      - LIDARR_URL=http://host.docker.internal:8686
+      - DEEMIX_URL=http://host.docker.internal:6595
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

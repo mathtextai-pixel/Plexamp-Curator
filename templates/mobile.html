@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Crate Remote // Plexamp DJ</title>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Crate DJ">
+    <meta name="theme-color" content="#0c0e14">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #0a0c10;
+            --bg-card: #131722;
+            --bg-card-subtle: #191f2e;
+            --border: #242c3f;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #f59e0b;
+            --accent-glow: rgba(245, 158, 11, 0.25);
+            --green: #10b981;
+            --blue: #38bdf8;
+            --purple: #a855f7;
+            --safe-bottom: env(safe-area-inset-bottom, 16px);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            min-height: 100vh;
+            padding: 1.25rem 1rem calc(var(--safe-bottom) + 1.5rem);
+            line-height: 1.4;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .container {
+            max-width: 540px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.25rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .brand h1 {
+            font-size: 1.35rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            background: linear-gradient(135deg, #fff 40%, var(--accent) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .badge-live {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.2rem 0.55rem;
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 9999px;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .badge-live .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: var(--green);
+            box-shadow: 0 0 6px var(--green);
+        }
+
+        /* Hero Prompt Section */
+        .prompt-card {
+            background: linear-gradient(145deg, #161b29 0%, #10131d 100%);
+            border: 1px solid #28334a;
+            border-radius: 18px;
+            padding: 1.25rem;
+            margin-bottom: 1.25rem;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+
+        .card-label {
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--accent);
+            font-weight: 700;
+            margin-bottom: 0.6rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+        }
+
+        .llm-mini-toggle {
+            display: inline-flex;
+            gap: 0.3rem;
+        }
+
+        .llm-mini-btn {
+            background: #101420;
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 0.18rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.68rem;
+            font-family: 'JetBrains Mono', monospace;
+            cursor: pointer;
+        }
+
+        .llm-mini-btn.active {
+            border-color: var(--accent);
+            color: #fff;
+            background: #1e2638;
+        }
+
+        .prompt-textarea {
+            width: 100%;
+            background: #090c12;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            color: #fff;
+            padding: 0.85rem 1rem;
+            font-size: 0.95rem;
+            font-family: inherit;
+            resize: none;
+            height: 78px;
+            outline: none;
+            transition: all 0.2s;
+            margin-bottom: 0.75rem;
+        }
+
+        .prompt-textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 12px var(--accent-glow);
+        }
+
+        .btn-generate {
+            width: 100%;
+            padding: 0.9rem;
+            background: var(--accent);
+            color: #0c0e14;
+            font-weight: 800;
+            font-size: 0.95rem;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 16px var(--accent-glow);
+            transition: all 0.2s;
+        }
+
+        .btn-generate:active {
+            transform: scale(0.98);
+        }
+
+        .btn-generate:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* Chips */
+        .chips-scroll {
+            display: flex;
+            gap: 0.45rem;
+            overflow-x: auto;
+            padding-bottom: 0.4rem;
+            margin-top: 0.75rem;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .chip {
+            background: #151a26;
+            border: 1px solid #232a3c;
+            color: var(--text-muted);
+            padding: 0.35rem 0.7rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .chip:active {
+            background: #242c40;
+            color: #fff;
+            border-color: var(--accent);
+        }
+
+        /* Active Result Card */
+        .result-box {
+            background: #111520;
+            border: 1px solid #222b3d;
+            border-radius: 16px;
+            padding: 1.15rem;
+            margin-bottom: 1.25rem;
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 0.6rem;
+            gap: 0.5rem;
+        }
+
+        .result-title {
+            font-size: 1.05rem;
+            font-weight: 800;
+            color: var(--accent);
+        }
+
+        .result-theme {
+            font-size: 0.75rem;
+            color: var(--blue);
+            font-family: 'JetBrains Mono', monospace;
+            margin-top: 0.15rem;
+        }
+
+        .result-vibe {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            font-style: italic;
+            margin-bottom: 0.85rem;
+            line-height: 1.35;
+        }
+
+        .result-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.6rem;
+            margin-bottom: 0.85rem;
+        }
+
+        .btn-action {
+            padding: 0.65rem;
+            border-radius: 10px;
+            font-size: 0.82rem;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.4rem;
+            text-decoration: none;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            text-align: center;
+            transition: all 0.2s;
+        }
+
+        .btn-plexamp {
+            background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%);
+            color: #fff;
+            border-color: transparent;
+        }
+
+        .btn-save {
+            background: #181f2f;
+            color: var(--text-main);
+            border-color: #2b354d;
+        }
+
+        .tracks-mini-list {
+            max-height: 140px;
+            overflow-y: auto;
+            border-top: 1px solid #1c2230;
+            padding-top: 0.6rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            font-size: 0.75rem;
+        }
+
+        .track-mini-item {
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .track-mini-item strong {
+            color: var(--text-main);
+        }
+
+        /* 1-Tap Control Grid */
+        .grid-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .tile-btn {
+            background: #131722;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 1rem;
+            text-align: left;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: var(--text-main);
+        }
+
+        .tile-btn:active {
+            border-color: var(--accent);
+            background: #191f2e;
+        }
+
+        .tile-icon {
+            font-size: 1.4rem;
+            margin-bottom: 0.4rem;
+        }
+
+        .tile-title {
+            font-size: 0.88rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .tile-desc {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-top: 0.2rem;
+        }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: calc(var(--safe-bottom) + 1.2rem);
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(19, 23, 34, 0.95);
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--accent);
+            color: #fff;
+            padding: 0.65rem 1.15rem;
+            border-radius: 9999px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            z-index: 9999;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            display: none;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="brand">
+                <span style="font-size:1.35rem;">📻</span>
+                <h1>Crate Remote</h1>
+            </div>
+            <div class="badge-live">
+                <a href="/?view=desktop" style="color:var(--text-muted); text-decoration:none; margin-right:0.4rem; font-size:0.72rem;">🖥️ Desktop</a>
+                <span class="dot"></span>
+                <span>Tailscale Live</span>
+            </div>
+        </header>
+
+        <!-- Prompt Generator -->
+        <div class="prompt-card">
+            <div class="card-label">
+                <span>✨ AI Vibe Dispatcher</span>
+                <div class="llm-mini-toggle">
+                    <button type="button" id="m-pill-gemini" class="llm-mini-btn {% if llm_status.provider == 'gemini' %}active{% endif %}" onclick="switchLlmProvider('gemini')">
+                        ⚡ Gemini (${{ "%.2f"|format(llm_status.month_spend_usd) }})
+                    </button>
+                    <button type="button" id="m-pill-ollama" class="llm-mini-btn {% if llm_status.provider == 'ollama' %}active{% endif %}" onclick="switchLlmProvider('ollama')">
+                        🦙 Ollama
+                    </button>
+                </div>
+            </div>
+            <textarea id="mobile-prompt-input" class="prompt-textarea" placeholder="Type a mood, feeling, or reference (e.g. 'Mumford & Avett banjos', 'Sunday morning acoustic', 'Late night soul')..."></textarea>
+
+            <button class="btn-generate" id="btn-generate" onclick="generateVibePlaylist()">
+                <span>🪄</span> Generate to Plexamp
+            </button>
+
+            <div class="chips-scroll">
+                <span class="chip" onclick="quickFill('Mumford & Sons and Avett Brothers style fast foot-stomping banjos and soaring choruses')">🌾 Mumford & Avett</span>
+                <span class="chip" onclick="quickFill('Late night drive through misty mountains, acoustic picking and melancholic folk')">🌙 Midnight Drive</span>
+                <span class="chip" onclick="quickFill('Warm 70s analog tape, funky pocket basslines and smoky falsettos like Khruangbin & Leon Bridges')">🎷 Warm Soul</span>
+                <span class="chip" onclick="quickFill('Fast anthemic acoustic punk and singalong emo with cathartic roaring guitars')">🎸 Acoustic Punk</span>
+                <span class="chip" onclick="quickFill('Sun-drenched jangle pop and breezy dream pop hooks like Flipturn & Peach Pit')">✨ Sun Jangle</span>
+            </div>
+        </div>
+
+        <!-- Result Box -->
+        <div class="result-box" id="result-box">
+            <div class="result-header">
+                <div>
+                    <div class="result-title" id="res-title">✨ Crate: The Daily Vibe</div>
+                    <div class="result-theme" id="res-theme"></div>
+                </div>
+                <span class="badge-live" id="res-count" style="color:var(--green); border-color:var(--green);"></span>
+            </div>
+            <div class="result-vibe" id="res-vibe"></div>
+
+            <div class="result-actions">
+                <a id="link-plexamp" href="plexamp://" class="btn-action btn-plexamp">
+                    <span>🎧</span> Open in Plexamp
+                </a>
+                <button class="btn-action btn-save" id="btn-save" onclick="saveVibePermanently()">
+                    <span>💾</span> Save Playlist
+                </button>
+            </div>
+
+            <div class="tracks-mini-list" id="res-tracks"></div>
+        </div>
+
+        <!-- 1-Tap Control Tiles -->
+        <div class="grid-actions">
+            <div class="tile-btn" onclick="triggerSurpriseMe()">
+                <div class="tile-icon">🎲</div>
+                <div class="tile-title">Surprise Me</div>
+                <div class="tile-desc">AI curveball from your {{ "{:,}".format(library_track_count) }} library tracks</div>
+            </div>
+
+            <div class="tile-btn" onclick="triggerRefreshAllChannels()">
+                <div class="tile-icon">🚀</div>
+                <div class="tile-title">Refresh 5 Channels</div>
+                <div class="tile-desc">Update all taste crates in-place with fresh flow</div>
+            </div>
+        </div>
+
+        <div style="text-align:center; margin-top:auto; padding-top:1rem;">
+            <p style="font-size:0.7rem; color:#475569; font-family:'JetBrains Mono',monospace;">
+                Connected to <strong>{{ host_label }}</strong> // {{ "{:,}".format(library_track_count) }} Tracks Indexed
+            </p>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        const PLEX_MACHINE_ID = {{ plex_machine_id | tojson }};
+        let currentVibeResult = null;
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 3500);
+        }
+
+        function updateMobileLlmUI(status) {
+            if (!status) return;
+            const gBtn = document.getElementById('m-pill-gemini');
+            const oBtn = document.getElementById('m-pill-ollama');
+            if (gBtn) {
+                gBtn.classList.toggle('active', status.provider === 'gemini');
+                gBtn.textContent = `⚡ Gemini ($${Number(status.month_spend_usd || 0).toFixed(2)})`;
+            }
+            if (oBtn) {
+                oBtn.classList.toggle('active', status.provider === 'ollama');
+            }
+        }
+
+        async function switchLlmProvider(provider) {
+            try {
+                const res = await fetch('/api/llm-provider', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({provider})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    updateMobileLlmUI(data.status);
+                    showToast(provider === 'ollama' ? '🦙 Using Local Ollama ($0)' : '⚡ Using Gemini Flash');
+                }
+            } catch (e) {
+                showToast('❌ Error switching AI');
+            }
+        }
+
+        function quickFill(text) {
+            const input = document.getElementById('mobile-prompt-input');
+            input.value = text;
+            input.focus();
+        }
+
+        async function generateVibePlaylist(promptOverride) {
+            const input = document.getElementById('mobile-prompt-input');
+            const prompt = promptOverride || input.value.trim();
+            if (!prompt) {
+                showToast('Type a mood or tap a chip above!');
+                input.focus();
+                return;
+            }
+
+            const btn = document.getElementById('btn-generate');
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> Curating in Plexamp...';
+            showToast('AI DJ is sequencing your library tracks...');
+
+            try {
+                const res = await fetch('/api/playlists/generate-from-prompt', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({prompt: prompt, count: 20})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentVibeResult = data;
+                    if (data.llm_status) updateMobileLlmUI(data.llm_status);
+                    showToast('✓ "The Daily Vibe" updated in-place in Plexamp!');
+
+                    document.getElementById('res-theme').textContent = data.creative_title;
+                    document.getElementById('res-vibe').textContent = '"' + data.vibe + '"';
+                    document.getElementById('res-count').textContent = `${data.track_count} Tracks Ready`;
+
+                    const plKey = data.rating_key || '';
+                    if (plKey && PLEX_MACHINE_ID) {
+                        document.getElementById('link-plexamp').href = `plexamp://play?metadataKey=%2Fplaylists%2F${encodeURIComponent(plKey)}&server=${encodeURIComponent(PLEX_MACHINE_ID)}`;
+                    } else {
+                        document.getElementById('link-plexamp').href = 'plexamp://';
+                    }
+
+                    const saveBtn = document.getElementById('btn-save');
+                    saveBtn.textContent = '💾 Save Playlist';
+                    saveBtn.disabled = false;
+
+                    const tracksBox = document.getElementById('res-tracks');
+                    tracksBox.replaceChildren();
+                    (data.tracks || []).forEach((t, idx) => {
+                        const row = document.createElement('div');
+                        row.className = 'track-mini-item';
+                        const num = document.createElement('span');
+                        num.style.color = 'var(--accent)';
+                        num.style.fontWeight = '700';
+                        num.textContent = `${idx + 1}. `;
+                        const art = document.createElement('strong');
+                        art.textContent = t.artist;
+                        row.appendChild(num);
+                        row.appendChild(art);
+                        row.appendChild(document.createTextNode(` — ${t.title}`));
+                        tracksBox.appendChild(row);
+                    });
+
+                    document.getElementById('result-box').style.display = 'block';
+                    document.getElementById('result-box').scrollIntoView({behavior: 'smooth'});
+                } else {
+                    showToast('❌ ' + (data.message || 'Error generating vibe'));
+                }
+            } catch (err) {
+                showToast('❌ Network error generating playlist');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<span>🪄</span> Generate to Plexamp';
+            }
+        }
+
+        async function triggerSurpriseMe() {
+            showToast('🎲 Spinning the vault for a surprise curveball...');
+            try {
+                const res = await fetch('/api/mobile/surprise-me', {method: 'POST'});
+                const data = await res.json();
+                if (data.success && data.prompt) {
+                    document.getElementById('mobile-prompt-input').value = data.prompt;
+                    generateVibePlaylist(data.prompt);
+                } else {
+                    showToast('❌ Error spinning surprise');
+                }
+            } catch (err) {
+                showToast('❌ Network error');
+            }
+        }
+
+        async function triggerRefreshAllChannels() {
+            showToast('🚀 Refreshing all 5 channels (~30s)...');
+            try {
+                const res = await fetch('/api/playlists/generate-all', {method: 'POST'});
+                const data = await res.json();
+                if (data.success) {
+                    if (data.llm_status) updateMobileLlmUI(data.llm_status);
+                    showToast(`✓ All ${data.playlists.length} channel mixtapes updated in Plexamp!`);
+                } else {
+                    showToast('❌ Error refreshing channels');
+                }
+            } catch (err) {
+                showToast('❌ Network error');
+            }
+        }
+
+        async function saveVibePermanently() {
+            if (!currentVibeResult || !currentVibeResult.rating_keys) {
+                showToast('No active vibe to save!');
+                return;
+            }
+            const saveBtn = document.getElementById('btn-save');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+
+            try {
+                const res = await fetch('/api/playlists/save-permanent', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        title: currentVibeResult.creative_title,
+                        rating_keys: currentVibeResult.rating_keys
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('✓ ' + data.message);
+                    saveBtn.textContent = '✓ Saved in Plexamp';
+                } else {
+                    showToast('❌ ' + (data.message || 'Error saving'));
+                    saveBtn.disabled = false;
+                    saveBtn.textContent = '💾 Save Playlist';
+                }
+            } catch (err) {
+                showToast('❌ Error saving playlist');
+                saveBtn.disabled = false;
+                saveBtn.textContent = '💾 Save Playlist';
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,1339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crate Excavator // Deep Music Discovery</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #0c0e14;
+            --bg-card: #151821;
+            --bg-card-hover: #1b1f2b;
+            --border: #232838;
+            --text-main: #f0f2f8;
+            --text-muted: #8b92a5;
+            --accent: #f59e0b;
+            --accent-hover: #fbbf24;
+            --accent-glow: rgba(245, 158, 11, 0.25);
+            --green: #10b981;
+            --blue: #3b82f6;
+            --purple: #8b5cf6;
+            --red: #f43f5e;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            min-height: 100vh;
+            padding: 2rem 1.5rem;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1420px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            margin-bottom: 2rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            flex-wrap: wrap;
+            gap: 1.5rem;
+        }
+
+        .title-block h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            background: linear-gradient(135deg, #fff 40%, var(--accent) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .title-block p {
+            color: var(--text-muted);
+            margin-top: 0.35rem;
+            font-size: 0.95rem;
+        }
+
+        .quick-links {
+            display: flex;
+            gap: 0.6rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .service-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.35rem 0.75rem;
+            background: #11141c;
+            border: 1px solid var(--border);
+            border-radius: 9999px;
+            font-size: 0.78rem;
+            font-family: 'JetBrains Mono', monospace;
+            text-decoration: none;
+            color: var(--text-muted);
+            transition: all 0.2s ease;
+        }
+
+        .service-badge:hover {
+            color: var(--text-main);
+            border-color: var(--accent);
+            transform: translateY(-1px);
+        }
+
+        .service-badge .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: var(--green);
+            box-shadow: 0 0 8px var(--green);
+        }
+
+        /* Prompt Playlist Generator Bar */
+        .prompt-gen-box {
+            background: linear-gradient(135deg, #181f2f 0%, #121622 100%);
+            border: 1px solid #2d374d;
+            border-radius: 16px;
+            padding: 1.3rem 1.6rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+        }
+
+        .prompt-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.8rem;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .prompt-header h2 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #fff;
+        }
+
+        .llm-toggle-wrap {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .llm-pill {
+            background: #111520;
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 0.25rem 0.65rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .llm-pill.active {
+            border-color: var(--accent);
+            color: #fff;
+            background: #1e2638;
+        }
+
+        .prompt-input-row {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .prompt-input {
+            flex: 1;
+            background: #0d1017;
+            border: 1px solid var(--border);
+            color: #fff;
+            padding: 0.85rem 1.15rem;
+            border-radius: 10px;
+            font-size: 0.95rem;
+            font-family: inherit;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .prompt-input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 12px var(--accent-glow);
+        }
+
+        .prompt-suggestions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .prompt-chip {
+            background: #141926;
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 0.25rem 0.65rem;
+            border-radius: 9999px;
+            font-size: 0.76rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .prompt-chip:hover {
+            color: #fff;
+            border-color: var(--accent);
+            background: #1d2436;
+        }
+
+        .prompt-result-card {
+            margin-top: 1rem;
+            background: #0e121a;
+            border: 1px solid #232b3e;
+            border-radius: 12px;
+            padding: 1rem 1.25rem;
+            display: none;
+        }
+
+        /* Hero Action Banner */
+        .sync-hero-banner {
+            background: linear-gradient(135deg, #181d2a 0%, #11141d 100%);
+            border: 1px solid #283046;
+            border-radius: 16px;
+            padding: 1.25rem 1.6rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+            flex-wrap: wrap;
+            gap: 1.2rem;
+        }
+
+        .hero-info h2 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .hero-info p {
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            margin-top: 0.2rem;
+        }
+
+        .hero-actions {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            padding: 0.65rem 1.15rem;
+            font-weight: 600;
+            font-size: 0.86rem;
+            border-radius: 8px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+            text-decoration: none;
+        }
+
+        .btn-accent {
+            background: var(--accent);
+            color: #0c0e14;
+            font-weight: 700;
+        }
+
+        .btn-accent:hover {
+            background: var(--accent-hover);
+            box-shadow: 0 4px 16px var(--accent-glow);
+        }
+
+        .btn-outline {
+            background: var(--bg-card);
+            border-color: var(--border);
+            color: var(--text-main);
+        }
+
+        .btn-outline:hover {
+            border-color: var(--accent);
+            background: var(--bg-card-hover);
+        }
+
+        /* Channel Bar */
+        .channel-bar-wrap {
+            margin-bottom: 1.8rem;
+        }
+
+        .channel-bar-title {
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            margin-bottom: 0.6rem;
+            font-weight: 700;
+        }
+
+        .channel-pills {
+            display: flex;
+            gap: 0.6rem;
+            overflow-x: auto;
+            padding-bottom: 0.4rem;
+        }
+
+        .channel-pill {
+            background: #12151e;
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 0.55rem 1rem;
+            border-radius: 10px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .channel-pill:hover {
+            border-color: #4b5563;
+            color: #fff;
+        }
+
+        .channel-pill.active {
+            background: #1c2130;
+            color: #fff;
+            border-color: var(--accent);
+            box-shadow: 0 0 12px var(--accent-glow);
+        }
+
+        .channel-pill .count {
+            background: #252b3d;
+            padding: 0.15rem 0.45rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* View Tabs */
+        .view-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.8rem;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .sub-tabs {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .sub-tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.95rem;
+            padding: 0.5rem 0.8rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .sub-tab-btn.active {
+            color: var(--accent);
+            border-bottom: 2px solid var(--accent);
+        }
+
+        .channel-quick-action {
+            display: flex;
+            gap: 0.6rem;
+            align-items: center;
+        }
+
+        /* Grid Cards */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.1rem;
+            transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+            position: relative;
+        }
+
+        .card:hover {
+            transform: translateY(-3px);
+            border-color: #3b445c;
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+        }
+
+        .card-top {
+            display: flex;
+            gap: 1.1rem;
+        }
+
+        .cover-wrapper {
+            position: relative;
+            width: 105px;
+            height: 105px;
+            flex-shrink: 0;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #1b1f2b;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
+
+        .cover-img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .card-meta {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-width: 0;
+            flex-grow: 1;
+        }
+
+        .album-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: #fff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 0.15rem;
+        }
+
+        .artist-name {
+            font-size: 0.92rem;
+            font-weight: 600;
+            color: var(--accent);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .tags-row {
+            display: flex;
+            gap: 0.45rem;
+            align-items: center;
+            margin-top: 0.45rem;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+        }
+
+        .badge-downloaded {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--green);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .badge-wanted {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--accent);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        .badge-notadded {
+            background: rgba(139, 146, 165, 0.15);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+        }
+
+        .channel-tag-badge {
+            font-size: 0.7rem;
+            color: #d1d5db;
+            background: #202636;
+            padding: 0.15rem 0.45rem;
+            border-radius: 4px;
+            border: 1px solid #2d354a;
+        }
+
+        .reason-box {
+            background: #11141c;
+            border: 1px solid #1f2330;
+            border-radius: 8px;
+            padding: 0.75rem 0.9rem;
+            font-size: 0.84rem;
+            color: #c7cbd6;
+            line-height: 1.45;
+        }
+
+        .reason-box strong {
+            color: #fff;
+        }
+
+        /* Audio Preview */
+        .audio-player-wrap {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+            background: #11141c;
+            border-radius: 8px;
+            padding: 0.4rem 0.8rem;
+            border: 1px solid var(--border);
+        }
+
+        .audio-player-wrap span {
+            font-size: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        audio {
+            height: 28px;
+            width: 100%;
+            filter: invert(1) hue-rotate(180deg) opacity(0.8);
+        }
+
+        /* Card Actions */
+        .card-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: auto;
+            flex-wrap: wrap;
+        }
+
+        .card-actions .btn {
+            flex: 1 1 auto;
+            justify-content: center;
+            font-size: 0.78rem;
+            padding: 0.48rem 0.65rem;
+        }
+
+        .btn-lidarr {
+            background: #252a38;
+            color: #fff;
+            border: 1px solid #363c4e;
+        }
+
+        .btn-lidarr:hover {
+            border-color: var(--blue);
+            color: #93c5fd;
+        }
+
+        .btn-deemix {
+            background: rgba(139, 92, 246, 0.15);
+            color: #c4b5fd;
+            border: 1px solid rgba(139, 92, 246, 0.3);
+        }
+
+        .btn-deemix:hover {
+            background: rgba(139, 92, 246, 0.25);
+            border-color: var(--purple);
+        }
+
+        .btn-bandcamp {
+            background: #171922;
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+        }
+
+        .btn-bandcamp:hover {
+            color: #fff;
+            border-color: #4b5563;
+        }
+
+        /* Vault Table */
+        .vault-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg-card);
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+        }
+
+        .vault-table th, .vault-table td {
+            padding: 0.85rem 1.1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .vault-table th {
+            background: #11141c;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .vault-table tr:hover td {
+            background: var(--bg-card-hover);
+        }
+
+        .track-chip {
+            background: #1b212f;
+            border: 1px solid #2f3950;
+            border-radius: 6px;
+            padding: 0.25rem 0.55rem;
+            font-size: 0.75rem;
+            color: #e2e8f0;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            padding: 1rem 1.4rem;
+            background: #1b202e;
+            border: 1px solid var(--accent);
+            border-radius: 10px;
+            box-shadow: 0 10px 35px rgba(0,0,0,0.7);
+            display: none;
+            z-index: 1000;
+            font-size: 0.9rem;
+            font-weight: 600;
+            max-width: 420px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="title-block">
+                <h1><span>⚡</span> Crate Excavator</h1>
+                <p>Taste Branching, Channel Playlists & Unplayed Vault Mining for Plexamp</p>
+            </div>
+
+            <div class="quick-links">
+                <a href="{{ config.PLEX_PUBLIC_URL }}/web" target="_blank" rel="noopener" class="service-badge">
+                    <span class="dot"></span> Plex (32400)
+                </a>
+                <a href="{{ config.TAUTULLI_PUBLIC_URL }}" target="_blank" rel="noopener" class="service-badge">
+                    <span class="dot"></span> Tautulli (8181)
+                </a>
+                <a href="{{ config.LIDARR_PUBLIC_URL }}" target="_blank" rel="noopener" class="service-badge">
+                    <span class="dot"></span> Lidarr (8686)
+                </a>
+                <a href="{{ config.DEEMIX_PUBLIC_URL }}" target="_blank" rel="noopener" class="service-badge">
+                    <span class="dot"></span> Deemix (6595)
+                </a>
+                <a href="/?view=mobile" class="service-badge" style="border-color:var(--accent); color:var(--accent);">
+                    📱 Mobile View
+                </a>
+            </div>
+        </header>
+
+        <!-- 🔮 Prompt-to-Playlist Generator -->
+        <div class="prompt-gen-box">
+            <div class="prompt-header">
+                <h2><span>✨</span> AI Vibe & Prompt Playlist Creator</h2>
+                <div class="llm-toggle-wrap">
+                    <button type="button" id="pill-gemini" class="llm-pill {% if llm_status.provider == 'gemini' %}active{% endif %}" onclick="switchLlmProvider('gemini')">
+                        ⚡ Gemini Flash (${{ "%.3f"|format(llm_status.month_spend_usd) }} / ${{ "%.2f"|format(llm_status.monthly_budget_usd) }})
+                    </button>
+                    <button type="button" id="pill-ollama" class="llm-pill {% if llm_status.provider == 'ollama' %}active{% endif %}" onclick="switchLlmProvider('ollama')">
+                        🦙 Local Ollama ({{ llm_status.ollama_model }})
+                    </button>
+                    <span style="font-size:0.78rem; color:var(--text-muted); font-family:'JetBrains Mono',monospace;">
+                        // <span id="library-track-count">{{ "{:,}".format(library_track_count) }}</span> Tracks
+                    </span>
+                </div>
+            </div>
+            <div class="prompt-input-row">
+                <input type="text" id="ai-prompt-input" class="prompt-input" placeholder="Type a mood, feeling, or reference (e.g. 'Avett Brothers & Mumford style banjos', 'Sunday morning acoustic', 'Late night indie soul')..." onkeydown="if(event.key==='Enter') createPromptPlaylist()">
+                <button class="btn btn-accent" id="btn-create-prompt-pl" onclick="createPromptPlaylist()" style="padding:0.85rem 1.4rem; white-space:nowrap;">
+                    🪄 Generate Playlist
+                </button>
+            </div>
+            <div class="prompt-suggestions">
+                <span style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; font-weight:700;">Try:</span>
+                <span class="prompt-chip" onclick="fillPrompt('Mumford & Sons and Avett Brothers style fast foot-stomping banjos and roaring choruses')">🌾 Mumford & Avett Banjos</span>
+                <span class="prompt-chip" onclick="fillPrompt('Late night drive through misty mountains, acoustic picking and melancholic folk')">🌙 Midnight Acoustic Drive</span>
+                <span class="prompt-chip" onclick="fillPrompt('Warm 70s analog tape, funky pocket basslines and smoky falsettos like Khruangbin & Leon Bridges')">🎷 Warm Analog Soul</span>
+                <span class="prompt-chip" onclick="fillPrompt('Fast anthemic acoustic punk and singalong emo with cathartic roaring guitars')">🎸 Cathartic Acoustic Punk</span>
+                <span class="prompt-chip" onclick="fillPrompt('Sun-drenched jangle pop and breezy dream pop hooks like Flipturn & Peach Pit')">✨ Sun-Drenched Jangle Pop</span>
+            </div>
+
+            <div class="prompt-result-card" id="prompt-result-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.6rem; flex-wrap:wrap; gap:0.5rem;">
+                    <div>
+                        <div style="display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;">
+                            <h4 id="prompt-result-title" style="color:var(--accent); font-size:1.05rem; font-weight:700;"></h4>
+                            <span id="prompt-result-theme" style="background:#222a3d; color:#93c5fd; padding:0.15rem 0.5rem; border-radius:6px; font-size:0.75rem; font-family:'JetBrains Mono',monospace;"></span>
+                        </div>
+                        <p id="prompt-result-vibe" style="color:var(--text-muted); font-size:0.85rem; font-style:italic; margin-top:0.25rem;"></p>
+                    </div>
+                    <div style="display:flex; gap:0.6rem; align-items:center;">
+                        <span id="prompt-result-count" class="service-badge" style="color:var(--green); border-color:var(--green);"></span>
+                        <button class="btn btn-outline" id="btn-save-permanent" onclick="saveCurrentVibePermanently()" style="font-size:0.78rem; padding:0.35rem 0.75rem;">
+                            💾 Save as Permanent Playlist
+                        </button>
+                    </div>
+                </div>
+                <div id="prompt-result-tracks" style="display:flex; flex-wrap:wrap; gap:0.4rem; max-height:160px; overflow-y:auto; padding-top:0.3rem;"></div>
+            </div>
+        </div>
+
+        <!-- 🚀 Hero Playlist Dispatcher -->
+        <div class="sync-hero-banner">
+            <div class="hero-info">
+                <h2><span>🎧</span> 5 Channel Playlists + Master Vault in Plexamp</h2>
+                <p>In-place Plex playlist updates preserve your pins & downloads across Country, Punk, Soul, Indie Pop & Canon.</p>
+            </div>
+            <div class="hero-actions">
+                <button class="btn btn-outline" onclick="discoverMoreArtists(this)">
+                    🔭 Discover New Artists
+                </button>
+                <button class="btn btn-outline" onclick="syncLidarr()">
+                    🔄 Sync Lidarr Status
+                </button>
+                <button class="btn btn-outline" onclick="deployLargeVaultPlaylist()">
+                    🏛️ Push Large Vault Playlist
+                </button>
+                <button class="btn btn-accent" id="btn-refresh-all" onclick="deployAllPlaylists(this)">
+                    🚀 Refresh All 5 Channel Playlists
+                </button>
+            </div>
+        </div>
+
+        <!-- 🏷️ Taste Channel Filter Bar -->
+        <div class="channel-bar-wrap">
+            <div class="channel-bar-title">Select Taste Channel</div>
+            <div class="channel-pills">
+                <button class="channel-pill active" onclick="selectChannel('all', this)">
+                    🌟 All Channels <span class="count">{{ recommendations|length }}</span>
+                </button>
+                <button class="channel-pill" onclick="selectChannel('alt_country', this)">
+                    🌾 Alt & Prime Country <span class="count">{{ channel_counts.alt_country }}</span>
+                </button>
+                <button class="channel-pill" onclick="selectChannel('pop_punk', this)">
+                    🎸 Pop & Acoustic Punk <span class="count">{{ channel_counts.pop_punk }}</span>
+                </button>
+                <button class="channel-pill" onclick="selectChannel('indie_pop', this)">
+                    ✨ Indie Pop & Shimmer <span class="count">{{ channel_counts.indie_pop }}</span>
+                </button>
+                <button class="channel-pill" onclick="selectChannel('indie_soul', this)">
+                    🎷 Indie Soul & Grooves <span class="count">{{ channel_counts.indie_soul }}</span>
+                </button>
+                <button class="channel-pill" onclick="selectChannel('canon', this)">
+                    ⚡ The Canon Classics <span class="count">{{ channel_counts.canon }}</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- View Controls & Channel Action -->
+        <div class="view-controls">
+            <div class="sub-tabs">
+                <button class="sub-tab-btn active" id="btn-tab-acquire" onclick="switchView('acquire')">
+                    📦 Fresh Crates to Acquire (<span id="recs-count">{{ recommendations|length }}</span>)
+                </button>
+                <button class="sub-tab-btn" id="btn-tab-vault" onclick="switchView('vault')">
+                    🏛️ In Your Vault (<span id="vault-tab-count">Unplayed</span> in Plex)
+                </button>
+            </div>
+
+            <div class="channel-quick-action">
+                <button class="btn btn-outline" id="btn-deploy-channel" onclick="deployCurrentChannel()">
+                    ⚡ Push Current Channel to Plexamp
+                </button>
+            </div>
+        </div>
+
+        <!-- VIEW 1: External Recommendations Cards -->
+        <div id="view-acquire">
+            <div class="grid" id="cards-grid">
+                {% for r in recommendations %}
+                <div class="card" data-channel="{{ r.channel }}" id="card-{{ r.id }}">
+                    <div class="card-top">
+                        <div class="cover-wrapper">
+                            {% if r.cover_url %}
+                            <img src="{{ r.cover_url }}" alt="{{ r.album }}" class="cover-img" loading="lazy">
+                            {% else %}
+                            <div style="display:flex;align-items:center;justify-content:center;height:100%;color:#4b5563;font-size:2rem;">💿</div>
+                            {% endif %}
+                        </div>
+
+                        <div class="card-meta">
+                            <div class="album-title" title="{{ r.album }}">{{ r.album }}</div>
+                            <div class="artist-name">{{ r.artist }}</div>
+                            <div class="tags-row">
+                                {% if r.lidarr_status == 'Downloaded' %}
+                                <span class="badge badge-downloaded">✓ In Library</span>
+                                {% elif r.lidarr_status == 'Wanted' %}
+                                <span class="badge badge-wanted">⏳ Wanted in Lidarr</span>
+                                {% else %}
+                                <span class="badge badge-notadded">Not in Lidarr</span>
+                                {% endif %}
+
+                                {% if r.channel %}
+                                <span class="channel-tag-badge">{{ r.channel }}</span>
+                                {% endif %}
+                                {% if r.year %}
+                                <span style="font-size:0.7rem; color:var(--text-muted);">{{ r.year }}</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+
+                    {% if r.reason %}
+                    <div class="reason-box">
+                        <strong>The Context:</strong> {{ r.reason }}
+                    </div>
+                    {% endif %}
+
+                    {% if r.preview_url %}
+                    <div class="audio-player-wrap">
+                        <span>Sample</span>
+                        <audio controls preload="none">
+                            <source src="{{ r.preview_url }}" type="audio/mp3">
+                        </audio>
+                    </div>
+                    {% endif %}
+
+                    <div class="card-actions">
+                        {% if r.lidarr_status == 'Downloaded' %}
+                        <button class="btn btn-lidarr" disabled style="opacity:0.6;cursor:default;">
+                            ✓ In Lidarr
+                        </button>
+                        {% else %}
+                        <button class="btn btn-lidarr" data-artist="{{ r.artist }}" data-album="{{ r.album }}" onclick="addToLidarrFromBtn(this)">
+                            📥 Send to Lidarr
+                        </button>
+                        {% endif %}
+
+                        {% if r.deemix_url %}
+                        <a href="{{ r.deemix_url }}" target="_blank" rel="noopener" class="btn btn-deemix" title="Open in Deemix to grab FLAC directly">
+                            ⚡ Deemix FLAC
+                        </a>
+                        {% endif %}
+
+                        <a href="{{ r.bandcamp_url }}" target="_blank" rel="noopener" class="btn btn-bandcamp" title="Search on Bandcamp">
+                            Bandcamp
+                        </a>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- VIEW 2: Vault Excavator Table -->
+        <div id="view-vault" style="display: none;">
+            <div style="margin-bottom: 1.2rem; background:#151821; border:1px solid var(--border); border-radius:12px; padding:1.2rem; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem;">
+                <div>
+                    <h3 style="font-size:1.05rem; margin-bottom:0.25rem;">Unplayed Albums In Your Plex Library</h3>
+                    <p style="color:var(--text-muted); font-size:0.86rem;" id="vault-filter-desc">Showing all unplayed albums. Filter by taste channel above or click "+ Add to Plexamp".</p>
+                </div>
+                <button class="btn btn-accent" id="btn-vault-action" onclick="handleVaultButtonClick()">
+                    🏛️ Push Large Vault Playlist to Plexamp
+                </button>
+            </div>
+
+            <table class="vault-table">
+                <thead>
+                    <tr>
+                        <th>Artist</th>
+                        <th>Album</th>
+                        <th>Year</th>
+                        <th>Genres</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="vault-rows">
+                    <tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:2rem;">Loading vault albums...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        const SERVER_CHANNELS = {{ channel_defs | tojson }};
+        let lastGeneratedResult = null;
+        let currentChannel = 'all';
+        let currentView = 'acquire';
+        let allVaultAlbums = [];
+
+        const channelMap = { 'all': 'All Channels' };
+        const channelKeywords = {};
+        for (const [key, def] of Object.entries(SERVER_CHANNELS)) {
+            channelMap[key] = def.name;
+            channelKeywords[key] = def.keywords || [];
+        }
+
+        function updateLlmStatusUI(status) {
+            if (!status) return;
+            const pGem = document.getElementById('pill-gemini');
+            const pOll = document.getElementById('pill-ollama');
+            if (pGem) {
+                pGem.classList.toggle('active', status.provider === 'gemini');
+                pGem.textContent = `⚡ Gemini Flash ($${Number(status.month_spend_usd || 0).toFixed(3)} / $${Number(status.monthly_budget_usd || 1.5).toFixed(2)})`;
+            }
+            if (pOll) {
+                pOll.classList.toggle('active', status.provider === 'ollama');
+                pOll.textContent = `🦙 Local Ollama (${status.ollama_model || 'hermes3:8b'})`;
+            }
+        }
+
+        async function switchLlmProvider(provider) {
+            try {
+                const res = await fetch('/api/llm-provider', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({provider})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    updateLlmStatusUI(data.status);
+                    showToast(provider === 'ollama'
+                        ? '🦙 Switched AI DJ to Local Ollama (hermes3:8b — $0.00 cost)'
+                        : '⚡ Switched AI DJ to Google Gemini Flash');
+                }
+            } catch (e) {
+                showToast('❌ Could not switch AI provider');
+            }
+        }
+
+        function fillPrompt(text) {
+            const input = document.getElementById('ai-prompt-input');
+            input.value = text;
+            input.focus();
+        }
+
+        async function createPromptPlaylist() {
+            const input = document.getElementById('ai-prompt-input');
+            const prompt = input.value.trim();
+            if (!prompt) {
+                showToast('Please type a mood or reference first!');
+                input.focus();
+                return;
+            }
+
+            const btn = document.getElementById('btn-create-prompt-pl');
+            btn.disabled = true;
+            btn.textContent = '🪄 Curating Flow...';
+            showToast('AI DJ is searching your library tracks & updating "✨ Crate: The Daily Vibe" in-place...');
+
+            try {
+                const res = await fetch('/api/playlists/generate-from-prompt', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({prompt: prompt, count: 20})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    lastGeneratedResult = data;
+                    if (data.llm_status) updateLlmStatusUI(data.llm_status);
+                    showToast(`✓ Updated "✨ Crate: The Daily Vibe" with ${data.track_count} tracks in Plexamp!`);
+
+                    const card = document.getElementById('prompt-result-card');
+                    document.getElementById('prompt-result-title').textContent = '🎵 ' + data.title;
+                    document.getElementById('prompt-result-theme').textContent = data.creative_title;
+                    document.getElementById('prompt-result-vibe').textContent = '"' + data.vibe + '"';
+                    document.getElementById('prompt-result-count').textContent = `✓ ${data.track_count} Tracks Ready`;
+
+                    const saveBtn = document.getElementById('btn-save-permanent');
+                    saveBtn.textContent = '💾 Save as Permanent Playlist';
+                    saveBtn.disabled = false;
+
+                    const tracksBox = document.getElementById('prompt-result-tracks');
+                    tracksBox.replaceChildren();
+                    (data.tracks || []).forEach((t, idx) => {
+                        const span = document.createElement('span');
+                        span.className = 'track-chip';
+                        const num = document.createElement('strong');
+                        num.style.color = 'var(--accent)';
+                        num.textContent = `${idx + 1}. `;
+                        span.appendChild(num);
+                        span.appendChild(document.createTextNode(`${t.artist} — ${t.title}`));
+                        tracksBox.appendChild(span);
+                    });
+                    card.style.display = 'block';
+                } else {
+                    showToast('❌ ' + (data.message || 'Error generating playlist'));
+                }
+            } catch (err) {
+                showToast('❌ Network error generating playlist');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🪄 Generate Playlist';
+            }
+        }
+
+        async function saveCurrentVibePermanently() {
+            if (!lastGeneratedResult || !lastGeneratedResult.rating_keys) {
+                showToast('No active vibe playlist to save!');
+                return;
+            }
+            const saveBtn = document.getElementById('btn-save-permanent');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            showToast('Saving permanent playlist to Plexamp: ' + lastGeneratedResult.creative_title);
+
+            try {
+                const res = await fetch('/api/playlists/save-permanent', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        title: lastGeneratedResult.creative_title,
+                        rating_keys: lastGeneratedResult.rating_keys
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('✓ ' + data.message);
+                    saveBtn.textContent = '✓ Saved in Plexamp';
+                } else {
+                    showToast('❌ ' + (data.message || 'Error saving playlist'));
+                    saveBtn.disabled = false;
+                    saveBtn.textContent = '💾 Save as Permanent Playlist';
+                }
+            } catch (err) {
+                showToast('❌ Error saving playlist');
+                saveBtn.disabled = false;
+                saveBtn.textContent = '💾 Save as Permanent Playlist';
+            }
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 4000);
+        }
+
+        function selectChannel(channelKey, btn) {
+            currentChannel = channelKey;
+            document.querySelectorAll('.channel-pill').forEach(p => p.classList.remove('active'));
+            btn.classList.add('active');
+
+            const channelName = channelMap[channelKey];
+            const deployBtn = document.getElementById('btn-deploy-channel');
+            if (deployBtn) {
+                deployBtn.textContent = channelKey === 'all' ? '⚡ Refresh All 5 Channels' : `⚡ Push ${channelName} to Plexamp`;
+            }
+
+            const vaultBtn = document.getElementById('btn-vault-action');
+            if (vaultBtn) {
+                vaultBtn.textContent = channelKey === 'all' ? '🏛️ Push Large Vault Playlist to Plexamp' : `🎯 Push ${channelName} to Plexamp`;
+            }
+
+            filterCards();
+            filterVaultTable();
+        }
+
+        function filterCards() {
+            const cards = document.querySelectorAll('#cards-grid .card');
+            let visibleCount = 0;
+            const targetChannelName = channelMap[currentChannel];
+
+            cards.forEach(card => {
+                const cardChannel = card.getAttribute('data-channel');
+                if (currentChannel === 'all' || cardChannel === targetChannelName) {
+                    card.style.display = 'flex';
+                    visibleCount++;
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+            document.getElementById('recs-count').textContent = visibleCount;
+        }
+
+        function switchView(view) {
+            currentView = view;
+            if (view === 'acquire') {
+                document.getElementById('view-acquire').style.display = 'block';
+                document.getElementById('view-vault').style.display = 'none';
+                document.getElementById('btn-tab-acquire').classList.add('active');
+                document.getElementById('btn-tab-vault').classList.remove('active');
+            } else {
+                document.getElementById('view-acquire').style.display = 'none';
+                document.getElementById('view-vault').style.display = 'block';
+                document.getElementById('btn-tab-acquire').classList.remove('active');
+                document.getElementById('btn-tab-vault').classList.add('active');
+                loadVaultAlbums();
+            }
+        }
+
+        async function loadVaultAlbums() {
+            if (allVaultAlbums.length > 0) {
+                filterVaultTable();
+                return;
+            }
+            try {
+                const res = await fetch('/api/vault');
+                allVaultAlbums = await res.json();
+                const tabCount = document.getElementById('vault-tab-count');
+                if (tabCount) tabCount.textContent = `${allVaultAlbums.length} Unplayed`;
+                filterVaultTable();
+            } catch (err) {
+                const tbody = document.getElementById('vault-rows');
+                tbody.innerHTML = '<tr><td colspan="5" style="color:#ef4444;text-align:center;">Failed to load vault</td></tr>';
+            }
+        }
+
+        function filterVaultTable() {
+            if (allVaultAlbums.length === 0) return;
+            const tbody = document.getElementById('vault-rows');
+            const kws = channelKeywords[currentChannel] || [];
+
+            let filtered = allVaultAlbums;
+            if (currentChannel !== 'all' && kws.length > 0) {
+                filtered = allVaultAlbums.filter(a => {
+                    const art = (a.artist || '').toLowerCase();
+                    return kws.some(k => art.includes(k));
+                });
+            }
+
+            document.getElementById('vault-filter-desc').textContent =
+                `Showing ${filtered.length} unplayed albums in ${channelMap[currentChannel]}.`;
+
+            tbody.replaceChildren();
+            filtered.forEach(a => {
+                const tr = document.createElement('tr');
+
+                const tdArt = document.createElement('td');
+                tdArt.style.fontWeight = '600';
+                tdArt.style.color = 'var(--accent)';
+                tdArt.textContent = a.artist || '—';
+
+                const tdAlb = document.createElement('td');
+                tdAlb.style.fontWeight = '600';
+                tdAlb.style.color = '#fff';
+                tdAlb.textContent = a.album || '—';
+
+                const tdYear = document.createElement('td');
+                tdYear.style.color = 'var(--text-muted)';
+                tdYear.textContent = a.year || '—';
+
+                const tdGen = document.createElement('td');
+                tdGen.style.fontSize = '0.8rem';
+                tdGen.style.color = 'var(--text-muted)';
+                tdGen.textContent = (a.genres || []).join(', ') || '—';
+
+                const tdAct = document.createElement('td');
+                const btn = document.createElement('button');
+                btn.className = 'btn btn-outline';
+                btn.style.fontSize = '0.75rem';
+                btn.style.padding = '0.3rem 0.6rem';
+                btn.textContent = '+ Add to Plexamp';
+                btn.addEventListener('click', () => addSingleToPlaylist(String(a.rating_key), a.album || 'Album'));
+                tdAct.appendChild(btn);
+
+                tr.append(tdArt, tdAlb, tdYear, tdGen, tdAct);
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function deployAllPlaylists(btn) {
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Curating 5 Channels...'; }
+            showToast('🚀 AI DJ is curating and sequencing all 5 channels in Plexamp (approx 30s)...');
+            try {
+                const res = await fetch('/api/playlists/generate-all', {method: 'POST'});
+                const data = await res.json();
+                if (data.success) {
+                    if (data.llm_status) updateLlmStatusUI(data.llm_status);
+                    showToast(`✓ Updated ${data.playlists.length} channel playlists in-place in Plexamp!`);
+                } else {
+                    showToast('❌ ' + (data.message || 'Error generating playlists'));
+                }
+            } catch (e) {
+                showToast('❌ Error generating playlists: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = '🚀 Refresh All 5 Channel Playlists'; }
+            }
+        }
+
+        async function deployLargeVaultPlaylist() {
+            showToast('🏛️ Updating Large Vault Playlist (250+ tracks) in Plexamp...');
+            try {
+                const res = await fetch('/api/vault/large-playlist', {method: 'POST'});
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`✓ "${data.playlist}" updated with ${data.track_count} tracks (${data.album_count} albums)!`);
+                } else {
+                    showToast('❌ ' + (data.message || 'Error generating large vault playlist'));
+                }
+            } catch (e) {
+                showToast('❌ Error creating large vault playlist');
+            }
+        }
+
+        function handleVaultButtonClick() {
+            if (currentChannel === 'all') {
+                deployLargeVaultPlaylist();
+            } else {
+                deployCurrentChannel();
+            }
+        }
+
+        async function deployCurrentChannel() {
+            if (currentChannel === 'all') {
+                deployAllPlaylists();
+                return;
+            }
+            const ch = currentChannel;
+            showToast(`Updating ${channelMap[ch]} playlist in Plexamp...`);
+            try {
+                const res = await fetch(`/api/playlists/generate/${ch}`, {method: 'POST'});
+                const data = await res.json();
+                if (data.success) {
+                    if (data.llm_status) updateLlmStatusUI(data.llm_status);
+                    showToast(`✓ "${data.playlist}" updated with ${data.track_count} tracks!`);
+                } else {
+                    showToast('❌ ' + data.message);
+                }
+            } catch (e) {
+                showToast('❌ Error updating channel playlist');
+            }
+        }
+
+        function addToLidarrFromBtn(btn) {
+            const artist = btn.getAttribute('data-artist');
+            const album = btn.getAttribute('data-album');
+            addToLidarr(artist, album, btn);
+        }
+
+        async function addToLidarr(artist, album, btn) {
+            btn.textContent = 'Adding...';
+            btn.disabled = true;
+            try {
+                const res = await fetch('/api/add-to-lidarr', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({artist, album})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    btn.textContent = '⏳ Searching...';
+                    btn.style.borderColor = 'var(--accent)';
+                    showToast('✓ ' + data.message);
+                } else {
+                    btn.textContent = 'Failed';
+                    btn.disabled = false;
+                    showToast('❌ ' + data.message);
+                }
+            } catch (err) {
+                btn.textContent = 'Error';
+                btn.disabled = false;
+                showToast('Error sending to Lidarr');
+            }
+        }
+
+        async function syncLidarr() {
+            showToast('Syncing with Lidarr library...');
+            const res = await fetch('/api/sync-lidarr', {method: 'POST'});
+            const data = await res.json();
+            showToast(data.message);
+            setTimeout(() => location.reload(), 1500);
+        }
+
+        async function discoverMoreArtists(btn) {
+            if (btn) { btn.disabled = true; btn.textContent = '🔭 Discovering...'; }
+            showToast('🔭 Analyzing Tautulli history & finding new stepping-stone albums...');
+            try {
+                const res = await fetch('/api/discover-more', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({count: 6})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`✓ ${data.message}`);
+                    if (data.added_count > 0) {
+                        setTimeout(() => location.reload(), 1500);
+                    }
+                } else {
+                    showToast('❌ Error discovering new artists');
+                }
+            } catch (e) {
+                showToast('❌ Network error during discovery');
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = '🔭 Discover New Artists'; }
+            }
+        }
+
+        async function addSingleToPlaylist(ratingKey, title) {
+            showToast('Adding ' + title + ' to Plex playlist...');
+            try {
+                const res = await fetch('/api/vault/add-track', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({rating_key: ratingKey})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(`✓ Added ${title} (Playlist now has ${data.leafCount} tracks)`);
+                } else {
+                    showToast('❌ ' + (data.message || 'Error adding track'));
+                }
+            } catch (err) {
+                showToast('❌ Network error adding track');
+            }
+        }
+
+        // Prefetch vault count on idle so tab label shows exact unplayed count
+        window.addEventListener('DOMContentLoaded', () => {
+            fetch('/api/vault').then(r => r.json()).then(data => {
+                if (Array.isArray(data)) {
+                    allVaultAlbums = data;
+                    const tabCount = document.getElementById('vault-tab-count');
+                    if (tabCount) tabCount.textContent = `${data.length} Unplayed`;
+                }
+            }).catch(() => {});
+        });
+    </script>
+</body>
+</html>

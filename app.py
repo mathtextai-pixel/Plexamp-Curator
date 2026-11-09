@@ -12,6 +12,7 @@ UI polls GET /api/jobs/<id> (see jobs.py).
 import datetime
 import fcntl
 import json
+import logging
 import os
 import random
 import sqlite3
@@ -22,13 +23,24 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, request
 
+import db
 import discovery_engine
 import gemini_curator
 import jobs
 import weekly_refresh
 from config import CONFIG, get_int, public_config
 from cron import CronError, CronSchedule
-from locks import REFRESH_JOB_LOCK, LockBusy, acquire, file_lock
+from locks import (
+    DISCOVERY_JOB_LOCK,
+    LIDARR_SYNC_JOB_LOCK,
+    REFRESH_JOB_LOCK,
+    REINDEX_JOB_LOCK,
+    LockBusy,
+    acquire,
+    file_lock,
+    lock_dir,
+)
+from logging_setup import configure_logging
 from music_excavator import (
     CHANNEL_DEFINITIONS,
     append_to_plex_playlist,
@@ -41,17 +53,15 @@ from music_excavator import (
     reindex_library_tracks,
 )
 
+configure_logging()
+log = logging.getLogger(__name__)
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(CONFIG["DATA_DIR"], "recommendations.db")
 
 # Every state-changing API call must carry this header. Browsers won't add a custom
 # header to a cross-site form post, so other web pages can't trigger these endpoints.
 CSRF_HEADER = "X-Requested-With"
 CSRF_HEADER_VALUE = "CrateExcavator"
-
-REINDEX_JOB_LOCK = "job:reindex"
-LIDARR_SYNC_JOB_LOCK = "job:lidarr-sync"
-DISCOVERY_JOB_LOCK = "job:discovery"
 
 # Input limits
 MAX_PROMPT_CHARS = 500
@@ -216,7 +226,8 @@ def index():
     pub_cfg = public_config()
     llm_status = gemini_curator.get_llm_status()
     track_count = get_library_track_count()
-    machine_id = get_plex_machine_id() or ""
+    # Short timeout: the page should render quickly even when Plex is down.
+    machine_id = get_plex_machine_id(timeout=3, retries=0, skip_if_recently_failed=True) or ""
 
     if is_mobile_request(request):
         host_label = urllib.parse.urlparse(pub_cfg.get("PUBLIC_HOST", "")).hostname or "Tailscale"
@@ -405,13 +416,8 @@ def api_generate_from_prompt():
 @app.route("/api/mobile/surprise-me", methods=["POST"])
 def api_surprise_me():
     def work(progress):
-        conn = sqlite3.connect(DB_PATH, timeout=20.0)
-        try:
+        with db.session() as conn:
             artists = [r[0] for r in conn.execute("SELECT DISTINCT artist FROM library_tracks WHERE artist != ''")]
-        except sqlite3.OperationalError:
-            artists = []
-        finally:
-            conn.close()
         if not artists:
             return 500, {"success": False, "message": "No library tracks indexed"}
 
@@ -536,7 +542,7 @@ def _scheduled_reindex() -> None:
         with file_lock(REINDEX_JOB_LOCK, timeout=15 * 60):
             reindex_library_tracks()
     except LockBusy:
-        print("[Scheduler] Skipped re-index: another re-index held the lock for 15 min.")
+        log.warning("Skipped re-index: another re-index held the lock for 15 min.")
 
 
 def _scheduled_refresh() -> None:
@@ -549,7 +555,7 @@ def _scheduled_discovery() -> None:
         with file_lock(DISCOVERY_JOB_LOCK, timeout=15 * 60):
             discovery_engine.run_weekly_discovery_crawl()
     except LockBusy:
-        print("[Scheduler] Skipped discovery crawl: another crawl held the lock for 15 min.")
+        log.warning("Skipped discovery crawl: another crawl held the lock for 15 min.")
 
 
 def _load_schedule() -> List[Tuple[str, CronSchedule, Callable[[], None]]]:
@@ -562,12 +568,12 @@ def _load_schedule() -> List[Tuple[str, CronSchedule, Callable[[], None]]]:
     ):
         expr = str(CONFIG.get(key) or "").strip()
         if not expr or expr.lower() in ("off", "disabled", "none"):
-            print(f"[Scheduler] {name} disabled ({key} is off).")
+            log.warning(f"Scheduler: {name} disabled ({key} is off).")
             continue
         try:
             tasks.append((name, CronSchedule(expr), fn))
         except CronError as e:
-            print(f"[Scheduler] Invalid {key}={expr!r} ({e}); {name} is DISABLED until fixed.")
+            log.warning(f"Scheduler: invalid {key}={expr!r} ({e}); {name} is DISABLED until fixed.")
     return tasks
 
 
@@ -586,8 +592,8 @@ def _start_background_scheduler():
     if str(CONFIG.get("RUN_SCHEDULER", "1")) != "1":
         return
 
-    os.makedirs(CONFIG["DATA_DIR"], exist_ok=True)
-    lock_path = os.path.join(CONFIG["DATA_DIR"], "scheduler.lock")
+    # Lives in LOCK_DIR, not DATA_DIR: see locks.py for why.
+    lock_path = os.path.join(lock_dir(), "scheduler.lock")
     try:
         fd = open(lock_path, "w")
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -604,13 +610,13 @@ def _start_background_scheduler():
         try:
             recs = discovery_engine.get_all_recommendations()
             if not recs:
-                print("[Scheduler] Populating initial seed recommendations...")
+                log.info("Populating initial seed recommendations...")
                 discovery_engine.populate_and_sync_db()
             if get_library_track_count() == 0:
-                print("[Scheduler] library_tracks is empty; running initial Plex track index...")
+                log.info("library_tracks is empty; running initial Plex track index...")
                 _scheduled_reindex()
         except Exception as e:
-            print(f"[Scheduler] Startup check error: {e}")
+            log.exception(f"Scheduler startup check failed: {e}")
 
         last_checked = datetime.datetime.now().replace(second=0, microsecond=0)
 
@@ -628,17 +634,17 @@ def _start_background_scheduler():
             while minute <= now:
                 for name, schedule, fn in tasks:
                     if schedule.matches(minute):
-                        print(f"[{datetime.datetime.now()}] [Scheduler] Running {name} (scheduled {minute:%a %H:%M})...")
+                        log.info(f"Scheduler: running {name} (scheduled {minute:%a %H:%M})...")
                         try:
                             fn()
                         except Exception as e:
-                            print(f"[Scheduler] {name} error: {e}")
+                            log.exception(f"Scheduler: {name} failed: {e}")
                 minute += datetime.timedelta(minutes=1)
 
     t = threading.Thread(target=_scheduler_loop, name="crate-scheduler", daemon=True)
     t.start()
     summary = " | ".join(f"{name}: {schedule.expr}" for name, schedule, _ in tasks) or "no tasks"
-    print(f"✓ Background scheduler started ({summary}).")
+    log.info(f"✓ Background scheduler started ({summary}).")
 
 
 _start_background_scheduler()
@@ -647,5 +653,5 @@ _start_background_scheduler()
 if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", CONFIG.get("PORT", 5050)))
-    print(f"Starting Crate Excavator Unified Server on http://{host}:{port} ...")
+    log.info(f"Starting Crate Excavator Unified Server on http://{host}:{port} ...")
     app.run(host=host, port=port, debug=False)

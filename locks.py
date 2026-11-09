@@ -1,5 +1,11 @@
 """
-Cross-process file locks (fcntl.flock) under DATA_DIR/locks.
+Cross-process file locks (fcntl.flock) under LOCK_DIR.
+
+LOCK_DIR defaults to a directory under the system temp dir, NOT DATA_DIR: on Docker
+Desktop for Mac the ./data bind mount does not enforce file locks between processes
+(each worker sees its own copy of the lock), so locks kept there silently do nothing.
+All processes that need these locks (Gunicorn workers, the scheduler thread, a
+`docker exec ... weekly_refresh.py`) run in the same container and share its /tmp.
 
 Gunicorn runs several worker processes plus the in-process scheduler thread, so
 an in-memory threading.Lock is not enough to stop two runs from rewriting the
@@ -12,6 +18,7 @@ import fcntl
 import hashlib
 import os
 import re
+import tempfile
 import time
 from typing import IO, Iterator, Optional
 
@@ -22,12 +29,17 @@ class LockBusy(Exception):
     """Raised when a lock could not be acquired in time."""
 
 
+def lock_dir() -> str:
+    path = CONFIG.get("LOCK_DIR") or os.path.join(tempfile.gettempdir(), "crate-excavator-locks")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def _lock_path(name: str) -> str:
-    lock_dir = os.path.join(CONFIG["DATA_DIR"], "locks")
-    os.makedirs(lock_dir, exist_ok=True)
+    lock_dir_path = lock_dir()
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "lock"
     digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
-    return os.path.join(lock_dir, f"{slug}-{digest}.lock")
+    return os.path.join(lock_dir_path, f"{slug}-{digest}.lock")
 
 
 class LockHandle:
@@ -80,5 +92,8 @@ def file_lock(name: str, timeout: Optional[float] = None, poll: float = 0.25) ->
         handle.release()
 
 
-# Job-level lock shared by the manual "refresh all" endpoints and the weekly scheduler.
-REFRESH_JOB_LOCK = "job:refresh-playlists"
+# Job-level locks shared by the API endpoints and the scheduler.
+REFRESH_JOB_LOCK = "job:refresh-playlists"   # channel / vault playlist refreshes
+REINDEX_JOB_LOCK = "job:reindex"
+LIDARR_SYNC_JOB_LOCK = "job:lidarr-sync"
+DISCOVERY_JOB_LOCK = "job:discovery"

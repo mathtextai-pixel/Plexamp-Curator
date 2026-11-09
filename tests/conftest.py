@@ -6,7 +6,6 @@ real Gemini / Plex / Lidarr, even if a .env with real keys exists.
 """
 
 import os
-import sqlite3
 import sys
 import tempfile
 
@@ -23,6 +22,7 @@ DATA_DIR = tempfile.mkdtemp(prefix="crate-excavator-tests-")
 
 os.environ.update({
     "DATA_DIR": DATA_DIR,
+    "LOCK_DIR": os.path.join(DATA_DIR, "locks"),
     "RUN_SCHEDULER": "0",
     "PLEX_URL": FAKE.url,
     "PLEX_TOKEN": "test-plex-token",
@@ -49,6 +49,7 @@ def fake():
     """The shared fake Plex/Lidarr server, reset to a clean state for each test."""
     FAKE.reset()
     music_excavator._CACHED_MACHINE_ID = None
+    music_excavator._MACHINE_ID_FAILED_AT = 0.0
     return FAKE
 
 
@@ -64,25 +65,20 @@ def db_path():
 
 
 @pytest.fixture
-def library(db_path):
-    """Create and fill the library_tracks table; returns a function taking (rating_key, artist, title, album) rows."""
+def library():
+    """Replace library_tracks contents; returns a function taking (rating_key, artist, title, album) rows."""
+    import db
+
     def _fill(rows):
-        conn = sqlite3.connect(db_path)
-        conn.execute("DROP TABLE IF EXISTS library_tracks")
-        conn.execute(
-            "CREATE TABLE library_tracks (rating_key TEXT PRIMARY KEY, artist TEXT, album TEXT, title TEXT, year INTEGER, genre TEXT)"
-        )
-        conn.executemany(
-            "INSERT INTO library_tracks (rating_key, artist, title, album) VALUES (?, ?, ?, ?)", rows
-        )
-        conn.commit()
-        conn.close()
+        with db.session() as conn:
+            conn.execute("DELETE FROM library_tracks")
+            conn.executemany(
+                "INSERT INTO library_tracks (rating_key, artist, title, album) VALUES (?, ?, ?, ?)", rows
+            )
+            conn.commit()
     return _fill
 
 
 @pytest.fixture
-def no_library(db_path):
-    conn = sqlite3.connect(db_path)
-    conn.execute("DROP TABLE IF EXISTS library_tracks")
-    conn.commit()
-    conn.close()
+def no_library(library):
+    library([])

@@ -6,8 +6,8 @@ with a strict SQLite-based monthly Gemini budget limiter (< $1.50/mo) and
 automatic fallback between Gemini Flash and local Ollama (hermes3:8b).
 """
 
-import datetime
 import json
+import logging
 import os
 import random
 import re
@@ -15,51 +15,18 @@ import sqlite3
 import urllib.error
 from typing import Any, Callable, Dict, List, Optional
 
+import db
 from config import CONFIG, get_float, get_int
 from http_client import request_json
 
-DB_PATH = os.path.join(CONFIG["DATA_DIR"], "recommendations.db")
+log = logging.getLogger(__name__)
+
 _VALID_PROVIDERS = ("gemini", "ollama")
 _PROVIDER_SETTING_KEY = "llm_provider"
 
 
 def _get_conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=20.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-def init_budget_table():
-    conn = _get_conn()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS gemini_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            prompt_tokens INTEGER,
-            completion_tokens INTEGER,
-            cost_usd REAL,
-            purpose TEXT
-        )
-        """
-    )
-    # Small key/value table for runtime settings that must be shared by all
-    # Gunicorn workers (an in-memory global only changes the worker that served the request).
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-
-
-init_budget_table()
+    return db.connect()
 
 
 def _default_provider() -> str:
@@ -78,7 +45,7 @@ def get_active_provider() -> str:
         finally:
             conn.close()
     except sqlite3.Error as e:
-        print(f"Warning reading LLM provider setting: {e}")
+        log.warning(f"reading LLM provider setting: {e}")
         row = None
     if row and row[0] in _VALID_PROVIDERS:
         return row[0]
@@ -103,17 +70,17 @@ def set_active_provider(provider: str) -> str:
     return get_active_provider()
 
 
+# Budget months follow UTC (SQLite's CURRENT_TIMESTAMP is UTC): spend resets at 00:00 UTC on the 1st.
+_MONTH_FILTER = "timestamp >= datetime('now', 'start of month')"
+
+
 def get_current_month_usage_usd() -> float:
-    """Return total cost spent on Gemini calls this calendar month."""
-    conn = _get_conn()
-    cur = conn.cursor()
-    first_of_month = datetime.datetime.now().strftime("%Y-%m-01 00:00:00")
-    cur.execute(
-        "SELECT SUM(cost_usd) FROM gemini_usage WHERE timestamp >= ?",
-        (first_of_month,),
-    )
-    res = cur.fetchone()[0]
-    conn.close()
+    """
+    Total Gemini cost this (UTC) calendar month, including reservations for calls
+    that are in flight or whose outcome is unknown.
+    """
+    with db.session() as conn:
+        res = conn.execute(f"SELECT SUM(cost_usd) FROM gemini_usage WHERE {_MONTH_FILTER}").fetchone()[0]
     return float(res) if res is not None else 0.0
 
 
@@ -130,20 +97,62 @@ def get_llm_status() -> dict:
     }
 
 
-def record_usage(prompt_tokens: int, completion_tokens: int, purpose: str) -> float:
-    price_in = get_float("GEMINI_PRICE_IN_PER_1M")
-    price_out = get_float("GEMINI_PRICE_OUT_PER_1M")
-    cost = (prompt_tokens / 1_000_000.0) * price_in + (
+def _cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
+    return (prompt_tokens / 1_000_000.0) * get_float("GEMINI_PRICE_IN_PER_1M") + (
         completion_tokens / 1_000_000.0
-    ) * price_out
-    conn = _get_conn()
-    conn.execute(
-        "INSERT INTO gemini_usage (prompt_tokens, completion_tokens, cost_usd, purpose) VALUES (?, ?, ?, ?)",
-        (prompt_tokens, completion_tokens, cost, purpose),
-    )
-    conn.commit()
-    conn.close()
-    return cost
+    ) * get_float("GEMINI_PRICE_OUT_PER_1M")
+
+
+def estimate_max_cost_usd(prompt: str) -> float:
+    """Worst-case cost of one call: generous input-token estimate + the full output token cap."""
+    est_prompt_tokens = len(prompt) // 3 + 50  # ~4 chars/token in English; 3 leaves headroom
+    return _cost_usd(est_prompt_tokens, get_int("GEMINI_MAX_OUTPUT_TOKENS"))
+
+
+def _reserve_budget(estimate: float, purpose: str) -> Optional[int]:
+    """
+    Atomically check the monthly cap and record a reservation for one call.
+    BEGIN IMMEDIATE takes SQLite's write lock, so concurrent calls from any worker
+    are checked one at a time and can't all slip under the cap together.
+    Returns the reservation row id, or None if the call would exceed the budget.
+    """
+    budget = get_float("GEMINI_MONTHLY_BUDGET_USD")
+    conn = db.connect()
+    conn.isolation_level = None  # manual transaction control
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        spent = conn.execute(f"SELECT COALESCE(SUM(cost_usd), 0) FROM gemini_usage WHERE {_MONTH_FILTER}").fetchone()[0]
+        if spent + estimate > budget:
+            conn.execute("ROLLBACK")
+            log.warning(
+                f"Monthly Gemini budget would be exceeded (${spent:.4f} spent + up to ${estimate:.4f} "
+                f"for this call > ${budget:.2f}). Skipping Gemini call ({purpose})."
+            )
+            return None
+        cur = conn.execute(
+            "INSERT INTO gemini_usage (prompt_tokens, completion_tokens, cost_usd, purpose, status) "
+            "VALUES (0, 0, ?, ?, 'reserved')",
+            (estimate, purpose),
+        )
+        conn.execute("COMMIT")
+        return cur.lastrowid
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def _settle_reservation(row_id: int, prompt_tokens: int, completion_tokens: int, cost: float, status: str) -> None:
+    with db.session() as conn:
+        conn.execute(
+            "UPDATE gemini_usage SET prompt_tokens = ?, completion_tokens = ?, cost_usd = ?, status = ? WHERE id = ?",
+            (prompt_tokens, completion_tokens, cost, status, row_id),
+        )
+        conn.commit()
 
 
 def _parse_json_lenient(text: str) -> Optional[object]:
@@ -197,28 +206,29 @@ def _escape_like(text: str) -> str:
 
 
 def call_gemini_raw_json(prompt: str, purpose: str = "curation", timeout: int = 20) -> Optional[object]:
-    """Call Google Gemini Flash with structured JSON output, 50-token thinking budget, and budget cap."""
+    """
+    Call Google Gemini Flash with structured JSON output, a small thinking budget,
+    an output-token cap, and the monthly budget cap enforced via a reservation.
+    """
     api_key = CONFIG.get("GEMINI_API_KEY", "")
     if not api_key:
-        print("Gemini API key is not configured.")
+        log.warning("Gemini API key is not configured.")
         return None
 
-    budget = get_float("GEMINI_MONTHLY_BUDGET_USD")
-    current_spend = get_current_month_usage_usd()
-    if current_spend >= budget:
-        print(
-            f"⚠️ Monthly Gemini budget limit reached (${current_spend:.4f} / ${budget:.2f}). "
-            "Skipping Gemini call."
-        )
+    estimate = estimate_max_cost_usd(prompt)
+    reservation = _reserve_budget(estimate, purpose)
+    if reservation is None:
         return None
 
     model_name = CONFIG.get("GEMINI_MODEL", "gemini-flash-latest")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    # The key goes in a header, not the URL, so it never appears in logs or proxies.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "temperature": 0.35,
+            "maxOutputTokens": get_int("GEMINI_MAX_OUTPUT_TOKENS"),
             "thinkingConfig": {"thinkingBudget": 50},
         },
     }
@@ -226,36 +236,46 @@ def call_gemini_raw_json(prompt: str, purpose: str = "curation", timeout: int = 
     try:
         # 429 / 5xx / connection errors are retried (those requests are not billed);
         # read timeouts are not, since the request may still have been processed and billed.
-        data = request_json("POST", url, body=payload, timeout=timeout, retries=2, backoff=1.5) or {}
-
-        usage = data.get("usageMetadata", {})
-        prompt_tokens = int(usage.get("promptTokenCount", 0) or 0)
-        # Include thoughtsTokenCount in output tokens for accurate billing
-        candidates_tokens = int(usage.get("candidatesTokenCount", 0) or 0)
-        thoughts_tokens = int(usage.get("thoughtsTokenCount", 0) or 0)
-        completion_tokens = candidates_tokens + thoughts_tokens
-
-        cost = record_usage(prompt_tokens, completion_tokens, purpose)
-        print(
-            f"  [Gemini] {purpose} -> {prompt_tokens} in / {completion_tokens} out "
-            f"(incl. {thoughts_tokens} thinking) | Cost: ${cost:.5f} | Month: ${current_spend + cost:.4f}"
-        )
-
-        candidates = data.get("candidates", [])
-        if candidates:
-            parts = candidates[0].get("content", {}).get("parts", [])
-            for part in parts:
-                if "text" in part and not part.get("thought"):
-                    parsed = _parse_json_lenient(part["text"])
-                    if parsed is not None:
-                        return parsed
-            if parts and "text" in parts[-1]:
-                return _parse_json_lenient(parts[-1]["text"])
+        data = request_json(
+            "POST", url, headers={"x-goog-api-key": api_key}, body=payload,
+            timeout=timeout, retries=2, backoff=1.5,
+        ) or {}
     except urllib.error.HTTPError as e:
-        # Don't print the exception's URL: it carries the API key.
-        print(f"Error calling Gemini API ({purpose}): HTTP {e.code} {e.reason}")
+        # Error responses aren't billed: release the reservation.
+        _settle_reservation(reservation, 0, 0, 0.0, "failed")
+        log.error(f"Error calling Gemini API ({purpose}): HTTP {e.code} {e.reason}")
+        return None
     except Exception as e:
-        print(f"Error calling Gemini API ({purpose}): {type(e).__name__}: {e}")
+        # Timeout / dropped connection: it may have been billed, so keep the reservation.
+        _settle_reservation(reservation, 0, 0, estimate, "unknown")
+        log.error(f"Error calling Gemini API ({purpose}): {type(e).__name__}: {e}")
+        return None
+
+    usage = data.get("usageMetadata", {}) or {}
+    prompt_tokens = int(usage.get("promptTokenCount", 0) or 0)
+    # Thinking tokens are billed as output
+    candidates_tokens = int(usage.get("candidatesTokenCount", 0) or 0)
+    thoughts_tokens = int(usage.get("thoughtsTokenCount", 0) or 0)
+    completion_tokens = candidates_tokens + thoughts_tokens
+    cost = _cost_usd(prompt_tokens, completion_tokens)
+    _settle_reservation(reservation, prompt_tokens, completion_tokens, cost, "final")
+    log.info(
+        f"Gemini {purpose} -> {prompt_tokens} in / {completion_tokens} out "
+        f"(incl. {thoughts_tokens} thinking) | Cost: ${cost:.5f} | Month: ${get_current_month_usage_usd():.4f}"
+    )
+
+    candidates = data.get("candidates") or []
+    if candidates:
+        if candidates[0].get("finishReason") == "MAX_TOKENS":
+            log.warning(f"Gemini {purpose} hit the {get_int('GEMINI_MAX_OUTPUT_TOKENS')}-token output cap; reply may be cut off.")
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        for part in parts:
+            if "text" in part and not part.get("thought"):
+                parsed = _parse_json_lenient(part["text"])
+                if parsed is not None:
+                    return parsed
+        if parts and "text" in parts[-1]:
+            return _parse_json_lenient(parts[-1]["text"])
     return None
 
 
@@ -285,10 +305,10 @@ def call_ollama_json(prompt: str, purpose: str = "curation", timeout: Optional[i
         response_text = data.get("response", "")
         parsed = _parse_json_lenient(response_text)
         if parsed is not None:
-            print(f"  [Ollama:{model}] {purpose} -> OK ($0.00)")
+            log.info(f"[Ollama:{model}] {purpose} -> OK ($0.00)")
             return parsed
     except Exception as e:
-        print(f"Error calling local Ollama ({purpose}): {e}")
+        log.error(f"Error calling local Ollama ({purpose}): {e}")
     return None
 
 
@@ -307,13 +327,13 @@ def call_llm_json(
         res = call_ollama_json(prompt, purpose=purpose)
         if res is not None:
             return res
-        print(f"  ↻ Ollama unavailable for '{purpose}', falling back to Gemini Flash...")
+        log.warning(f"↻ Ollama unavailable for '{purpose}', falling back to Gemini Flash...")
         return call_gemini_raw_json(prompt, purpose=purpose, timeout=timeout)
     else:
         res = call_gemini_raw_json(prompt, purpose=purpose, timeout=timeout)
         if res is not None:
             return res
-        print(f"  ↻ Gemini unavailable for '{purpose}', falling back to local Ollama...")
+        log.warning(f"↻ Gemini unavailable for '{purpose}', falling back to local Ollama...")
         return call_ollama_json(prompt, purpose=purpose)
 
 
@@ -376,14 +396,14 @@ Candidates:
                 used.add(k)
                 sequenced.append(key_map[k])
         if sequenced:
-            print(f"  ✓ Sequenced {len(sequenced)} tracks for '{channel_name}'")
+            log.info(f"✓ Sequenced {len(sequenced)} tracks for '{channel_name}'")
             liner = _clean_str(res.get("liner_notes"))
             if liner:
-                print(f"    Liner notes: \"{liner}\"")
+                log.info(f"Liner notes: \"{liner}\"")
             return sequenced[:max(target_count, 1)]
 
     # Fallback if LLM unavailable: balanced round-robin across artists
-    print("  Falling back to heuristic track selection.")
+    log.warning("Falling back to heuristic track selection.")
     by_artist: Dict[str, List[dict]] = {}
     for t in candidate_tracks:
         by_artist.setdefault(t["artist"], []).append(t)
@@ -500,7 +520,6 @@ def generate_playlist_from_user_prompt(
     )
 
     conn = _get_conn()
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     # Ensure library_tracks table is populated
@@ -514,7 +533,6 @@ def generate_playlist_from_user_prompt(
         conn.close()
         reindex_library_tracks()
         conn = _get_conn()
-        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         try:
             cur.execute("SELECT DISTINCT artist FROM library_tracks WHERE artist != ''")
@@ -587,7 +605,7 @@ Return JSON:
             """
             SELECT rating_key, artist, title, album
             FROM library_tracks
-            WHERE lower(artist) = lower(?)
+            WHERE artist = ? COLLATE NOCASE
             ORDER BY RANDOM()
             LIMIT 12
             """,

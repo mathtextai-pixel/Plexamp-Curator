@@ -88,7 +88,12 @@ class _Handler(BaseHTTPRequestHandler):
                 page = st["vault_albums"][start:start + size]
                 return self._send(200, {"MediaContainer": {"totalSize": len(st["vault_albums"]), "Metadata": page}})
             if kind == "10":
-                return self._send(200, {"MediaContainer": {"Metadata": st["library_tracks"]}})
+                start = int(q.get("X-Plex-Container-Start", ["0"])[0])
+                size = int(q.get("X-Plex-Container-Size", [str(len(st["library_tracks"]) or 1)])[0])
+                if mode.get("tracks_fail_at") is not None and start >= mode["tracks_fail_at"]:
+                    return self._send(500, {})
+                page = st["library_tracks"][start:start + size]
+                return self._send(200, {"MediaContainer": {"totalSize": len(st["library_tracks"]), "Metadata": page}})
 
         if path.startswith("/library/metadata/") and path.endswith("/children"):
             rk = path.split("/")[3]

@@ -205,6 +205,14 @@
             transition: all 0.2s;
         }
 
+        .prompt-chip {
+            font-family: inherit;
+            line-height: inherit;
+        }
+        .prompt-chip:focus-visible, .llm-pill:focus-visible, .channel-pill:focus-visible, .btn:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
         .prompt-chip:hover {
             color: #fff;
             border-color: var(--accent);
@@ -699,11 +707,11 @@
             </div>
             <div class="prompt-suggestions">
                 <span style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; font-weight:700;">Try:</span>
-                <span class="prompt-chip" onclick="fillPrompt('Mumford & Sons and Avett Brothers style fast foot-stomping banjos and roaring choruses')">🌾 Mumford & Avett Banjos</span>
-                <span class="prompt-chip" onclick="fillPrompt('Late night drive through misty mountains, acoustic picking and melancholic folk')">🌙 Midnight Acoustic Drive</span>
-                <span class="prompt-chip" onclick="fillPrompt('Warm 70s analog tape, funky pocket basslines and smoky falsettos like Khruangbin & Leon Bridges')">🎷 Warm Analog Soul</span>
-                <span class="prompt-chip" onclick="fillPrompt('Fast anthemic acoustic punk and singalong emo with cathartic roaring guitars')">🎸 Cathartic Acoustic Punk</span>
-                <span class="prompt-chip" onclick="fillPrompt('Sun-drenched jangle pop and breezy dream pop hooks like Flipturn & Peach Pit')">✨ Sun-Drenched Jangle Pop</span>
+                <button type="button" class="prompt-chip" onclick="fillPrompt('Mumford & Sons and Avett Brothers style fast foot-stomping banjos and roaring choruses')">🌾 Mumford & Avett Banjos</button>
+                <button type="button" class="prompt-chip" onclick="fillPrompt('Late night drive through misty mountains, acoustic picking and melancholic folk')">🌙 Midnight Acoustic Drive</button>
+                <button type="button" class="prompt-chip" onclick="fillPrompt('Warm 70s analog tape, funky pocket basslines and smoky falsettos like Khruangbin & Leon Bridges')">🎷 Warm Analog Soul</button>
+                <button type="button" class="prompt-chip" onclick="fillPrompt('Fast anthemic acoustic punk and singalong emo with cathartic roaring guitars')">🎸 Cathartic Acoustic Punk</button>
+                <button type="button" class="prompt-chip" onclick="fillPrompt('Sun-drenched jangle pop and breezy dream pop hooks like Flipturn & Peach Pit')">✨ Sun-Drenched Jangle Pop</button>
             </div>
 
             <div class="prompt-result-card" id="prompt-result-card">
@@ -1157,6 +1165,16 @@
             }
         }
 
+        // Same whole-word matching as textmatch.py on the server: "pup" matches "PUP", not "Puppy".
+        function normName(text) {
+            return (text || '').toLowerCase()
+                .replace(/&/g, ' and ')
+                .replace(/[.'’`]/g, '')
+                .replace(/[^\p{L}\p{N}\s_]/gu, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
         function filterVaultTable() {
             if (allVaultAlbums.length === 0) return;
             const tbody = document.getElementById('vault-rows');
@@ -1164,9 +1182,10 @@
 
             let filtered = allVaultAlbums;
             if (currentChannel !== 'all' && kws.length > 0) {
+                const phrases = kws.map(normName).filter(Boolean);
                 filtered = allVaultAlbums.filter(a => {
-                    const art = (a.artist || '').toLowerCase();
-                    return kws.some(k => art.includes(k));
+                    const art = ` ${normName(a.artist)} `;
+                    return phrases.some(p => art.includes(` ${p} `));
                 });
             }
 

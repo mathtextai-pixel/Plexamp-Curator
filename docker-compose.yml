@@ -1,6 +1,10 @@
 services:
   crate-excavator:
-    build: .
+    build:
+      context: .
+      args:
+        # Must match the owner of ./data on the host (see Dockerfile).
+        APP_UID: ${APP_UID:-1000}
     image: crate-excavator:latest
     container_name: crate-excavator
     restart: unless-stopped
@@ -15,6 +19,8 @@ services:
       - DEEMIX_URL=http://host.docker.internal:6595
       - OLLAMA_URL=http://host.docker.internal:11434
       - DATA_DIR=/app/data
+      # Scheduler times (the *_CRON settings) use this time zone. Set TZ in .env, e.g. TZ=America/Chicago.
+      - TZ=${TZ:-UTC}
     volumes:
       - ./data:/app/data
     extra_hosts:

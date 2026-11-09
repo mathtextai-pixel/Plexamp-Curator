@@ -31,12 +31,15 @@ _DEFAULTS = {
     "GEMINI_MODEL": "gemini-flash-latest",
     "GEMINI_PRICE_IN_PER_1M": "0.50",   # USD per 1M input tokens  (verify against your billing page)
     "GEMINI_PRICE_OUT_PER_1M": "3.00",  # USD per 1M output tokens (thinking tokens billed as output)
-    "GEMINI_MONTHLY_BUDGET_USD": "1.50",
+    "GEMINI_MONTHLY_BUDGET_USD": "1.50",   # UTC calendar month
+    "GEMINI_MAX_OUTPUT_TOKENS": "4096",    # per call, thinking included; also used for the worst-case budget estimate
     "OLLAMA_URL": "http://127.0.0.1:11434",
     "OLLAMA_MODEL": "hermes3:8b",
     "OLLAMA_TIMEOUT": "60",
     # Storage
     "DATA_DIR": os.path.join(BASE_DIR, "data"),
+    # Lock files: must be on a filesystem that enforces flock (default: system temp dir; see locks.py)
+    "LOCK_DIR": "",
     # Scheduler
     "RUN_SCHEDULER": "1",
     "WEEKLY_REFRESH_CRON": "0 9 * * mon",   # minute hour day month day_of_week
@@ -47,6 +50,8 @@ _DEFAULTS = {
     "RECENTLY_PLAYED_DAYS": "14",
     # Web
     "PORT": "5050",
+    # Logging: DEBUG, INFO, WARNING, ERROR
+    "LOG_LEVEL": "INFO",
 }
 
 _SECRETS = ("PLEX_TOKEN", "TAUTULLI_KEY", "LIDARR_API_KEY", "GEMINI_API_KEY")

@@ -4,11 +4,16 @@ Weekly Automatic Crate Playlist & Discovery Refresh Script.
 Re-indexes the Plex music library, refreshes all 5 Channel Discovery Playlists
 and the Large Vault Playlist in Plex (in-place, preserving ratingKeys), and
 crawls for new stepping-stone album recommendations.
+
+Each step runs independently: a failure in one is logged and the rest still run.
+A summary is appended to DATA_DIR/weekly_refresh.log.
 """
 
 import datetime
+import logging
 import os
 import sys
+from typing import Callable, List, Tuple
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -16,84 +21,117 @@ if SCRIPT_DIR not in sys.path:
 
 from config import CONFIG
 from discovery_engine import run_weekly_discovery_crawl
-from locks import REFRESH_JOB_LOCK, LockBusy, file_lock
+from locks import REFRESH_JOB_LOCK, REINDEX_JOB_LOCK, LockBusy, file_lock
 from music_excavator import (
     generate_channel_playlists,
     generate_large_vault_playlist,
     reindex_library_tracks,
 )
 
-LOG_FILE = os.path.join(CONFIG["DATA_DIR"], "weekly_refresh.log")
+log = logging.getLogger(__name__)
 
+LOG_FILE = os.path.join(CONFIG["DATA_DIR"], "weekly_refresh.log")
 
 # How long a scheduled refresh waits for a manual refresh that is already running.
 REFRESH_LOCK_WAIT_SECONDS = 30 * 60
+REINDEX_LOCK_WAIT_SECONDS = 15 * 60
 
 
-def run_refresh(include_discovery: bool = True):
-    """Run the full refresh while holding the shared refresh lock (waits for any manual run)."""
-    try:
-        with file_lock(REFRESH_JOB_LOCK, timeout=REFRESH_LOCK_WAIT_SECONDS):
-            _run_refresh_locked(include_discovery)
-    except LockBusy:
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"[{now}] ❌ Skipped weekly refresh: another playlist refresh held the lock for {REFRESH_LOCK_WAIT_SECONDS // 60} min.\n\n"
-        print(msg, file=sys.stderr, end="")
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        with open(LOG_FILE, "a") as f:
-            f.write(msg)
+def _timestamp() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _run_refresh_locked(include_discovery: bool):
+def _append_log_file(lines: List[str]) -> None:
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    header = f"[{now}] === STARTING AUTOMATED WEEKLY PLAYLIST & DISCOVERY REFRESH ===\n"
-    print(header, end="")
-
-    lines = [header]
-    try:
-        # 0. Re-index library_tracks from Plex
-        indexed = reindex_library_tracks()
-        msg0 = f"  ✓ Library Re-index: {indexed} tracks synced from Plex\n"
-        print(msg0, end="")
-        lines.append(msg0)
-
-        # 1. Refresh all 5 Taste Channels (with rotation & LLM mixtape flow)
-        channel_results = generate_channel_playlists(rotate=True, use_gemini_flow=True)
-        for res in channel_results:
-            msg = f"  ✓ Channel: {res['title']} -> {res['track_count']} tracks ({res['album_count']} albums)\n"
-            print(msg, end="")
-            lines.append(msg)
-
-        # 2. Refresh the Large Vault Playlist
-        vault_res = generate_large_vault_playlist(rotate=True)
-        if vault_res:
-            msg = f"  ✓ Vault Master: {vault_res['title']} -> {vault_res['track_count']} tracks ({vault_res['album_count']} albums)\n"
-            print(msg, end="")
-            lines.append(msg)
-
-        # 3. Crawl for new stepping-stone recommendations
-        if include_discovery:
-            new_recs = run_weekly_discovery_crawl()
-            msg_disc = f"  ✓ Discovery Crawl: {len(new_recs)} new albums added to Crate\n"
-            print(msg_disc, end="")
-            lines.append(msg_disc)
-
-        summary = (
-            f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-            f"=== REFRESH COMPLETE: {len(channel_results)} channels + Large Vault updated! ===\n\n"
-        )
-        print(summary, end="")
-        lines.append(summary)
-
-    except Exception as e:
-        err = f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ❌ ERROR during weekly refresh: {e}\n\n"
-        print(err, file=sys.stderr, end="")
-        lines.append(err)
-
     with open(LOG_FILE, "a") as f:
         f.writelines(lines)
 
 
+def run_refresh(include_discovery: bool = True) -> bool:
+    """
+    Run the full refresh while holding the shared refresh lock (waits for any manual run).
+    Returns True only if every step succeeded.
+    """
+    try:
+        with file_lock(REFRESH_JOB_LOCK, timeout=REFRESH_LOCK_WAIT_SECONDS):
+            return _run_refresh_locked(include_discovery)
+    except LockBusy:
+        msg = (
+            f"[{_timestamp()}] ❌ Skipped weekly refresh: another playlist refresh held the lock "
+            f"for {REFRESH_LOCK_WAIT_SECONDS // 60} min.\n\n"
+        )
+        log.error(msg.strip())
+        _append_log_file([msg])
+        return False
+
+
+# --- steps: each returns a one-line summary, or raises -----------------------
+
+def _step_reindex() -> str:
+    with file_lock(REINDEX_JOB_LOCK, timeout=REINDEX_LOCK_WAIT_SECONDS):
+        indexed = reindex_library_tracks()
+    if indexed <= 0:
+        raise RuntimeError("no tracks indexed (is Plex reachable?)")
+    return f"Library re-index: {indexed:,} tracks synced from Plex"
+
+
+def _step_channels() -> str:
+    results = generate_channel_playlists(rotate=True, use_gemini_flow=True)
+    if not results:
+        raise RuntimeError("no channel playlists were updated")
+    lines = [f"{r['title']} -> {r['track_count']} tracks ({r['album_count']} albums)" for r in results]
+    return f"Channels ({len(results)} updated): " + "; ".join(lines)
+
+
+def _step_vault() -> str:
+    res = generate_large_vault_playlist(rotate=True)
+    if not res:
+        raise RuntimeError("vault playlist was not updated")
+    return f"Vault master: {res['title']} -> {res['track_count']} tracks ({res['album_count']} albums)"
+
+
+def _step_discovery() -> str:
+    added = run_weekly_discovery_crawl()
+    return f"Discovery crawl: {len(added)} new albums added to Crate"
+
+
+def _run_refresh_locked(include_discovery: bool) -> bool:
+    steps: List[Tuple[str, Callable[[], str]]] = [
+        ("Library re-index", _step_reindex),
+        ("Channel playlists", _step_channels),
+        ("Vault playlist", _step_vault),
+    ]
+    if include_discovery:
+        steps.append(("Discovery crawl", _step_discovery))
+
+    header = f"[{_timestamp()}] === STARTING WEEKLY PLAYLIST REFRESH ===\n"
+    log.info(header.strip())
+    lines = [header]
+    failed = []
+
+    for name, step in steps:
+        try:
+            summary = step()
+            lines.append(f"  ✓ {summary}\n")
+            log.info(summary)
+        except Exception as e:
+            failed.append(name)
+            lines.append(f"  ❌ {name} failed: {e}\n")
+            log.exception(f"{name} failed: {e}")
+
+    if failed:
+        footer = f"[{_timestamp()}] === REFRESH FINISHED WITH ERRORS ({len(failed)}/{len(steps)} failed: {', '.join(failed)}) ===\n\n"
+        log.error(footer.strip())
+    else:
+        footer = f"[{_timestamp()}] === REFRESH COMPLETE: all {len(steps)} steps succeeded ===\n\n"
+        log.info(footer.strip())
+    lines.append(footer)
+    _append_log_file(lines)
+    return not failed
+
+
 if __name__ == "__main__":
-    run_refresh()
+    from logging_setup import configure_logging
+
+    configure_logging()
+    sys.exit(0 if run_refresh() else 1)

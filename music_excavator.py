@@ -4,6 +4,7 @@ Music Excavator: Mine your unplayed Plex vault and discover new music
 powered by Tautulli play history and Plex Media Server.
 """
 
+import logging
 import os
 import random
 import sqlite3
@@ -12,11 +13,14 @@ import urllib.parse
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+import db
 from config import CONFIG, get_int
 from http_client import get_json, request_json, request_raw
 from locks import file_lock
+from textmatch import contains_any_phrase, contains_phrase
 
-DB_PATH = os.path.join(CONFIG["DATA_DIR"], "recommendations.db")
+log = logging.getLogger(__name__)
+
 _CACHED_MACHINE_ID: Optional[str] = None
 
 
@@ -49,7 +53,7 @@ def get_tautulli_recent_plays(limit: int = 500) -> List[dict]:
         data = get_json(url, timeout=10)
         return (data or {}).get("response", {}).get("data", {}).get("data", []) or []
     except Exception as e:
-        print(f"Warning fetching Tautulli history: {e}")
+        log.warning(f"Could not fetch Tautulli history: {e}")
         return []
 
 
@@ -135,7 +139,7 @@ def get_unplayed_vault_albums(limit: Optional[int] = None) -> List[dict]:
         try:
             data = get_json(url, headers=get_plex_headers(), timeout=20)
         except Exception as e:
-            print(f"Error fetching unplayed vault albums (offset {start}): {e}")
+            log.error(f"Error fetching unplayed vault albums (offset {start}): {e}")
             if not items:
                 return []
             break  # keep what we have rather than failing the whole refresh
@@ -160,18 +164,29 @@ def get_unplayed_vault_albums(limit: Optional[int] = None) -> List[dict]:
     return results
 
 
-def get_plex_machine_id() -> Optional[str]:
-    """Retrieve and cache machine identifier from Plex Media Server."""
-    global _CACHED_MACHINE_ID
+_MACHINE_ID_FAILED_AT = 0.0
+MACHINE_ID_RETRY_AFTER_SECONDS = 30
+
+
+def get_plex_machine_id(timeout: float = 10, retries: int = 2, skip_if_recently_failed: bool = False) -> Optional[str]:
+    """
+    Retrieve and cache the Plex machine identifier.
+    With skip_if_recently_failed=True (page loads), return None straight away if a lookup
+    failed in the last MACHINE_ID_RETRY_AFTER_SECONDS instead of waiting on Plex again.
+    """
+    global _CACHED_MACHINE_ID, _MACHINE_ID_FAILED_AT
     if _CACHED_MACHINE_ID:
         return _CACHED_MACHINE_ID
-    try:
-        data = get_json(f"{_plex_url()}/identity", headers=get_plex_headers(), timeout=10)
-        _CACHED_MACHINE_ID = (data or {}).get("MediaContainer", {}).get("machineIdentifier")
-        return _CACHED_MACHINE_ID
-    except Exception as e:
-        print(f"Error fetching Plex machine ID: {e}")
+    if skip_if_recently_failed and time.monotonic() - _MACHINE_ID_FAILED_AT < MACHINE_ID_RETRY_AFTER_SECONDS:
         return None
+    try:
+        data = get_json(f"{_plex_url()}/identity", headers=get_plex_headers(), timeout=timeout, retries=retries)
+        _CACHED_MACHINE_ID = (data or {}).get("MediaContainer", {}).get("machineIdentifier") or None
+    except Exception as e:
+        log.error(f"Error fetching Plex machine ID: {e}")
+    if not _CACHED_MACHINE_ID:
+        _MACHINE_ID_FAILED_AT = time.monotonic()
+    return _CACHED_MACHINE_ID
 
 
 class PlexError(Exception):
@@ -238,7 +253,7 @@ def _replace_playlist_items_in_place(pl_id: str, title: str, items_uri: str, exp
         request_raw("DELETE", f"{base}/items", headers=get_plex_headers(), timeout=15,
                     retries=2, retry_on_timeout=True)
     except Exception as e:
-        print(f"Error clearing playlist '{title}' (ratingKey={pl_id}): {e}. Playlist left unchanged.")
+        log.error(f"Error clearing playlist '{title}' (ratingKey={pl_id}): {e}. Playlist left unchanged.")
         return None
 
     # 2. Refill. PUT appends, so it is only re-sent once Plex confirms the playlist is still empty.
@@ -248,17 +263,17 @@ def _replace_playlist_items_in_place(pl_id: str, title: str, items_uri: str, exp
             request_raw("PUT", put_url, headers=get_plex_headers(), timeout=30, retries=0)
             break
         except Exception as e:
-            print(f"Warning: adding items to '{title}' failed on attempt {attempt} ({e}); checking playlist state...")
+            log.warning(f"Adding items to '{title}' failed on attempt {attempt} ({e}); checking playlist state...")
             try:
                 current = _fetch_playlist_info(pl_id)
             except Exception as e2:
-                print(f"Error: could not verify playlist '{title}' (ratingKey={pl_id}) after failed update: {e2}")
+                log.error(f"Could not verify playlist '{title}' (ratingKey={pl_id}) after failed update: {e2}")
                 return None
             if int(current.get("leafCount") or 0) > 0:
                 break  # Plex applied the PUT even though the response was lost
             if attempt == 2:
-                print(
-                    f"Error: playlist '{title}' (ratingKey={pl_id}) is empty after a failed update. "
+                log.error(
+                    f"Playlist '{title}' (ratingKey={pl_id}) is empty after a failed update. "
                     "It was NOT recreated, so its ratingKey and pins are preserved; re-run to refill it."
                 )
                 return None
@@ -267,7 +282,7 @@ def _replace_playlist_items_in_place(pl_id: str, title: str, items_uri: str, exp
     try:
         info = _fetch_playlist_info(pl_id)
     except Exception as e:
-        print(f"Warning: updated playlist '{title}' but could not read it back: {e}")
+        log.warning(f"Updated playlist '{title}' but could not read it back: {e}")
         info = {}
     return _playlist_result(info, title, pl_id, expected_count)
 
@@ -284,11 +299,11 @@ def _create_playlist(title: str, items_uri: str) -> Optional[dict]:
         data = request_json("POST", f"{_plex_url()}/playlists?{params}", headers=get_plex_headers(),
                             timeout=15, retries=0)
     except Exception as e:
-        print(f"Error creating playlist '{title}': {e}")
+        log.error(f"Error creating playlist '{title}': {e}")
         return None
     pl = ((data or {}).get("MediaContainer", {}).get("Metadata") or [{}])[0]
     if not pl.get("ratingKey"):
-        print(f"Error creating playlist '{title}': Plex returned no ratingKey")
+        log.error(f"Error creating playlist '{title}': Plex returned no ratingKey")
         return None
     return _playlist_result(pl, title, "", 0)
 
@@ -315,7 +330,7 @@ def create_or_replace_plex_playlist(title: str, rating_keys: List[str]) -> Optio
         try:
             existing = find_plex_playlist_by_title(title)
         except PlexError as e:
-            print(f"Error: {e}. Not touching playlist '{title}' to avoid creating a duplicate.")
+            log.error(f"{e}. Not touching playlist '{title}' to avoid creating a duplicate.")
             return None
 
         if existing and existing.get("ratingKey"):
@@ -337,7 +352,7 @@ def append_to_plex_playlist(title: str, rating_key: str) -> Optional[dict]:
         try:
             existing = find_plex_playlist_by_title(title)
         except PlexError as e:
-            print(f"Error: {e}. Not appending to '{title}' to avoid creating a duplicate.")
+            log.error(f"{e}. Not appending to '{title}' to avoid creating a duplicate.")
             return None
         if not existing or not existing.get("ratingKey"):
             return _create_playlist(title, item_uri)
@@ -348,12 +363,12 @@ def append_to_plex_playlist(title: str, rating_key: str) -> Optional[dict]:
             # PUT appends: never retried, or the item could be added twice.
             request_raw("PUT", put_url, headers=get_plex_headers(), timeout=10, retries=0)
         except Exception as e:
-            print(f"Error appending to playlist '{title}': {e}")
+            log.error(f"Error appending to playlist '{title}': {e}")
             return None
         try:
             info = _fetch_playlist_info(pl_id)
         except Exception as e:
-            print(f"Warning: appended to '{title}' but could not read it back: {e}")
+            log.warning(f"Appended to '{title}' but could not read it back: {e}")
             info = {}
         return _playlist_result(info, title, pl_id, int(existing.get("leafCount") or 0) + 1)
 
@@ -362,40 +377,53 @@ def append_to_plex_playlist(title: str, rating_key: str) -> Optional[dict]:
 create_plex_playlist = create_or_replace_plex_playlist
 
 
+REINDEX_PAGE_SIZE = 5000
+# Refuse to delete stale rows if this would remove more than this share of the index:
+# a sudden drop usually means a wrong MUSIC_SECTION_ID or a partial Plex response, not
+# that you deleted a fifth of your library overnight.
+REINDEX_MAX_PRUNE_FRACTION = 0.2
+
+
+def _fetch_all_library_tracks() -> Tuple[List[dict], bool]:
+    """
+    Page through every audio track (type=10) in the music section.
+    Returns (items, complete). `complete` is False if any page failed, in which
+    case the caller must not treat missing tracks as deleted.
+    """
+    items: List[dict] = []
+    start = 0
+    while True:
+        url = (
+            f"{_plex_url()}/library/sections/{_music_section_id()}/all?type=10"
+            f"&X-Plex-Container-Start={start}&X-Plex-Container-Size={REINDEX_PAGE_SIZE}"
+        )
+        try:
+            data = get_json(url, headers=get_plex_headers(), timeout=45, retries=1)
+        except Exception as e:
+            log.error(f"Error fetching library tracks from Plex for re-index (offset {start}): {e}")
+            return items, False
+        container = (data or {}).get("MediaContainer", {})
+        page = container.get("Metadata", []) or []
+        items.extend(page)
+        start += len(page)
+        total = container.get("totalSize")
+        if not page or len(page) < REINDEX_PAGE_SIZE or (isinstance(total, int) and start >= total):
+            if isinstance(total, int) and start < total:
+                log.warning(f"Plex reported {total} tracks but returned {start}; treating re-index as incomplete.")
+                return items, False
+            return items, True
+
+
 def reindex_library_tracks() -> int:
     """
-    Fetch all audio tracks (type=10) from the Plex music section and sync them
-    into the SQLite `library_tracks` table in `data/recommendations.db`.
-    Returns the total number of indexed tracks.
+    Sync every audio track in the Plex music section into the `library_tracks` table.
+    New and changed tracks are upserted. Tracks missing from Plex are removed only when
+    the fetch was complete and the removal is not suspiciously large.
+    Returns the number of tracks fetched from Plex (0 if nothing could be fetched).
     """
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    url = f"{_plex_url()}/library/sections/{_music_section_id()}/all?type=10"
-    try:
-        data = get_json(url, headers=get_plex_headers(), timeout=45, retries=1)
-        items = (data or {}).get("MediaContainer", {}).get("Metadata", []) or []
-    except Exception as e:
-        print(f"Error fetching library tracks from Plex for re-index: {e}")
-        return 0
-
+    items, complete = _fetch_all_library_tracks()
     if not items:
         return 0
-
-    conn = sqlite3.connect(DB_PATH, timeout=20.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS library_tracks (
-            rating_key TEXT PRIMARY KEY,
-            artist TEXT,
-            album TEXT,
-            title TEXT,
-            year INTEGER,
-            genre TEXT
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_lib_artist ON library_tracks(artist)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_lib_title ON library_tracks(title)")
 
     rows = []
     seen_keys = set()
@@ -411,40 +439,41 @@ def reindex_library_tracks() -> int:
         genres = ", ".join(g.get("tag", "") for g in it.get("Genre", []) if g.get("tag"))
         rows.append((rk, artist, album, title, year, genres))
 
-    with conn:
-        conn.executemany(
-            """
-            INSERT OR REPLACE INTO library_tracks (rating_key, artist, album, title, year, genre)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        # Remove tracks that no longer exist in Plex
-        cur = conn.execute("SELECT rating_key FROM library_tracks")
-        existing_keys = {r[0] for r in cur.fetchall()}
-        stale_keys = existing_keys - seen_keys
-        if stale_keys:
+    removed = 0
+    with db.session() as conn:
+        with conn:
+            existing_keys = {r[0] for r in conn.execute("SELECT rating_key FROM library_tracks")}
             conn.executemany(
-                "DELETE FROM library_tracks WHERE rating_key = ?",
-                [(k,) for k in stale_keys],
+                """
+                INSERT OR REPLACE INTO library_tracks (rating_key, artist, album, title, year, genre)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
             )
+            stale_keys = existing_keys - seen_keys
+            if stale_keys and not complete:
+                log.warning(f"Re-index incomplete: kept {len(stale_keys)} tracks that Plex did not return.")
+            elif stale_keys and len(stale_keys) > REINDEX_MAX_PRUNE_FRACTION * len(existing_keys):
+                log.error(
+                    f"Re-index would remove {len(stale_keys)} of {len(existing_keys)} indexed tracks "
+                    f"(more than {REINDEX_MAX_PRUNE_FRACTION:.0%}); keeping them. Check MUSIC_SECTION_ID / Plex. "
+                    "If the library really shrank, clear the library_tracks table to re-index from scratch."
+                )
+            elif stale_keys:
+                conn.executemany("DELETE FROM library_tracks WHERE rating_key = ?", [(k,) for k in stale_keys])
+                removed = len(stale_keys)
 
-    conn.close()
-    print(f"  ✓ Indexed {len(rows)} tracks from Plex into library_tracks (removed {len(stale_keys)} stale).")
+    log.info(f"✓ Indexed {len(rows)} tracks from Plex into library_tracks (removed {removed} stale).")
     return len(rows)
 
 
 def get_library_track_count() -> int:
     """Return total number of indexed tracks in library_tracks."""
-    if not os.path.exists(DB_PATH):
-        return 0
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=10.0)
-        cur = conn.execute("SELECT COUNT(*) FROM library_tracks")
-        count = cur.fetchone()[0]
-        conn.close()
+        with db.session() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM library_tracks").fetchone()[0]
         return int(count or 0)
-    except Exception:
+    except sqlite3.Error:
         return 0
 
 
@@ -569,8 +598,108 @@ def get_album_tracks(rating_key: str) -> List[dict]:
                 "duration": t.get("duration", 0),
             })
     except Exception as e:
-        print(f"Error fetching tracks for album {rating_key}: {e}")
+        log.error(f"Error fetching tracks for album {rating_key}: {e}")
     return tracks
+
+
+def _build_channel_playlist(
+    key: str,
+    cdef: dict,
+    vault: List[dict],
+    recent_keys: Set[str],
+    recent_pairs: Set[Tuple[str, str]],
+    rotate: bool,
+    use_gemini_flow: bool,
+) -> Optional[dict]:
+    """Pick albums and tracks for one channel and update its Plex playlist in place."""
+    import gemini_curator
+
+    title = cdef["title"]
+
+    matched_albums = []
+
+    # 1. Match specific target masterpieces
+    targets = list(cdef["targets"])
+    if rotate:
+        random.shuffle(targets)
+    for art, alb in targets:
+        for a in vault:
+            if contains_phrase(a.get("artist") or "", art) and contains_phrase(a.get("album") or "", alb):
+                if a not in matched_albums:
+                    matched_albums.append(a)
+                    break
+
+    # 2. Gather more albums by keywords
+    keyword_matches = []
+    for a in vault:
+        if contains_any_phrase(a.get("artist") or "", cdef["keywords"]):
+            if a not in matched_albums and a not in keyword_matches:
+                keyword_matches.append(a)
+
+    if rotate:
+        random.shuffle(keyword_matches)
+
+    for a in keyword_matches:
+        if len(matched_albums) >= 10:
+            break
+        matched_albums.append(a)
+
+    if not matched_albums:
+        return None
+
+    # 3. Collect candidate tracks across whole albums (skipping recently played tracks)
+    candidate_tracks = []
+    for alb in matched_albums:
+        rk = alb.get("rating_key")
+        if not rk:
+            continue
+        al_tracks = get_album_tracks(str(rk))
+        if not al_tracks:
+            continue
+        art_lower = (alb.get("artist") or "").strip().lower()
+        fresh_tracks = [
+            t for t in al_tracks
+            if t["ratingKey"] not in recent_keys
+            and (art_lower, (t.get("title") or "").strip().lower()) not in recent_pairs
+        ]
+        pool = fresh_tracks if fresh_tracks else al_tracks
+        sampled = random.sample(pool, min(4, len(pool))) if rotate else pool[:4]
+        for t in sampled:
+            candidate_tracks.append({
+                "ratingKey": t["ratingKey"],
+                "artist": alb.get("artist"),
+                "album": alb.get("album"),
+                "title": t["title"],
+                "year": alb.get("year"),
+                "duration": t["duration"],
+            })
+
+    track_rating_keys = []
+    if use_gemini_flow and candidate_tracks:
+        sequenced = gemini_curator.sequence_flowing_playlist(
+            channel_name=cdef["name"],
+            channel_desc=cdef["description"],
+            candidate_tracks=candidate_tracks,
+            target_count=20,
+        )
+        track_rating_keys = [str(s["ratingKey"]) for s in sequenced]
+
+    # Fallback to album keys if track keys failed
+    if not track_rating_keys:
+        track_rating_keys = [str(a["rating_key"]) for a in matched_albums[:8] if a.get("rating_key")]
+
+    pl = create_or_replace_plex_playlist(title, track_rating_keys)
+    if pl:
+        log.info(f"✓ Updated {title} (ratingKey={pl['ratingKey']}): {pl['leafCount']} tracks ({len(matched_albums)} albums)")
+        return {
+            "channel_key": key,
+            "title": pl["title"],
+            "rating_key": pl["ratingKey"],
+            "track_count": pl["leafCount"],
+            "album_count": len(matched_albums),
+            "icon": cdef["icon"],
+        }
+    return None
 
 
 def generate_channel_playlists(
@@ -584,8 +713,6 @@ def generate_channel_playlists(
     Samples across whole albums (excluding tracks played in the last RECENTLY_PLAYED_DAYS)
     and asks the configured LLM to sequence a cohesive ~20-track mixtape.
     """
-    import gemini_curator
-
     report = progress or (lambda _msg: None)
     report("Scanning your unplayed vault in Plex…")
     vault = get_unplayed_vault_albums()
@@ -599,92 +726,15 @@ def generate_channel_playlists(
 
     results = []
     for idx, (key, cdef) in enumerate(selected_channels.items(), 1):
-        title = cdef["title"]
         report(f"Curating {cdef['icon']} {cdef['name']} ({idx}/{len(selected_channels)})…")
-        matched_albums = []
-
-        # 1. Match specific target masterpieces
-        targets = list(cdef["targets"])
-        if rotate:
-            random.shuffle(targets)
-        for art, alb in targets:
-            for a in vault:
-                if art.lower() in (a.get("artist") or "").lower() and alb.lower() in (a.get("album") or "").lower():
-                    if a not in matched_albums:
-                        matched_albums.append(a)
-                        break
-
-        # 2. Gather more albums by keywords
-        keyword_matches = []
-        for a in vault:
-            art = (a.get("artist") or "").lower()
-            if any(k in art for k in cdef["keywords"]):
-                if a not in matched_albums and a not in keyword_matches:
-                    keyword_matches.append(a)
-
-        if rotate:
-            random.shuffle(keyword_matches)
-
-        for a in keyword_matches:
-            if len(matched_albums) >= 10:
-                break
-            matched_albums.append(a)
-
-        if not matched_albums:
+        try:
+            res = _build_channel_playlist(key, cdef, vault, recent_keys, recent_pairs, rotate, use_gemini_flow)
+        except Exception as e:
+            # One broken channel must not stop the others from refreshing.
+            log.exception(f"Channel '{cdef['name']}' failed: {e}")
             continue
-
-        # 3. Collect candidate tracks across whole albums (skipping recently played tracks)
-        candidate_tracks = []
-        for alb in matched_albums:
-            rk = alb.get("rating_key")
-            if not rk:
-                continue
-            al_tracks = get_album_tracks(str(rk))
-            if not al_tracks:
-                continue
-            art_lower = (alb.get("artist") or "").strip().lower()
-            fresh_tracks = [
-                t for t in al_tracks
-                if t["ratingKey"] not in recent_keys
-                and (art_lower, (t.get("title") or "").strip().lower()) not in recent_pairs
-            ]
-            pool = fresh_tracks if fresh_tracks else al_tracks
-            sampled = random.sample(pool, min(4, len(pool))) if rotate else pool[:4]
-            for t in sampled:
-                candidate_tracks.append({
-                    "ratingKey": t["ratingKey"],
-                    "artist": alb.get("artist"),
-                    "album": alb.get("album"),
-                    "title": t["title"],
-                    "year": alb.get("year"),
-                    "duration": t["duration"],
-                })
-
-        track_rating_keys = []
-        if use_gemini_flow and candidate_tracks:
-            sequenced = gemini_curator.sequence_flowing_playlist(
-                channel_name=cdef["name"],
-                channel_desc=cdef["description"],
-                candidate_tracks=candidate_tracks,
-                target_count=20,
-            )
-            track_rating_keys = [str(s["ratingKey"]) for s in sequenced]
-
-        # Fallback to album keys if track keys failed
-        if not track_rating_keys:
-            track_rating_keys = [str(a["rating_key"]) for a in matched_albums[:8] if a.get("rating_key")]
-
-        pl = create_or_replace_plex_playlist(title, track_rating_keys)
-        if pl:
-            results.append({
-                "channel_key": key,
-                "title": pl["title"],
-                "rating_key": pl["ratingKey"],
-                "track_count": pl["leafCount"],
-                "album_count": len(matched_albums),
-                "icon": cdef["icon"],
-            })
-            print(f" ✓ Updated {title} (ratingKey={pl['ratingKey']}): {pl['leafCount']} tracks ({len(matched_albums)} albums)")
+        if res:
+            results.append(res)
 
     return results
 
@@ -706,7 +756,7 @@ def generate_large_vault_playlist(rotate: bool = False) -> Optional[dict]:
             random.shuffle(targets)
         for art, alb in targets:
             for a in vault:
-                if art.lower() in (a.get("artist") or "").lower() and alb.lower() in (a.get("album") or "").lower():
+                if contains_phrase(a.get("artist") or "", art) and contains_phrase(a.get("album") or "", alb):
                     rk = str(a.get("rating_key"))
                     if rk not in selected_keys:
                         ch_matches.append(a)
@@ -714,8 +764,7 @@ def generate_large_vault_playlist(rotate: bool = False) -> Optional[dict]:
 
         kw_matches = []
         for a in vault:
-            art = (a.get("artist") or "").lower()
-            if any(k in art for k in cdef["keywords"]):
+            if contains_any_phrase(a.get("artist") or "", cdef["keywords"]):
                 rk = str(a.get("rating_key"))
                 if rk not in selected_keys and a not in ch_matches:
                     kw_matches.append(a)
@@ -734,9 +783,8 @@ def generate_large_vault_playlist(rotate: bool = False) -> Optional[dict]:
     ]
     gem_matches = []
     for a in vault:
-        art = (a.get("artist") or "").lower()
         rk = str(a.get("rating_key"))
-        if rk not in selected_keys and any(g in art for g in other_gems):
+        if rk not in selected_keys and contains_any_phrase(a.get("artist") or "", other_gems):
             gem_matches.append(a)
 
     if rotate:
@@ -763,7 +811,7 @@ def generate_large_vault_playlist(rotate: bool = False) -> Optional[dict]:
     title = "🏛️ Crate: The Vault (Large Unplayed Gems)"
     pl = create_or_replace_plex_playlist(title, selected_keys)
     if pl:
-        print(f" ✓ Updated {title} (ratingKey={pl['ratingKey']}): {pl['leafCount']} tracks ({len(selected_keys)} albums)")
+        log.info(f"✓ Updated {title} (ratingKey={pl['ratingKey']}): {pl['leafCount']} tracks ({len(selected_keys)} albums)")
         return {
             "title": pl["title"],
             "track_count": pl["leafCount"],
@@ -775,7 +823,7 @@ def generate_large_vault_playlist(rotate: bool = False) -> Optional[dict]:
 
 def generate_playlists():
     """Create or refresh all discovery playlists in Plex."""
-    print("=== REFRESHING ALL CRATE CHANNEL PLAYLISTS ===")
+    log.info("=== REFRESHING ALL CRATE CHANNEL PLAYLISTS ===")
     results = generate_channel_playlists()
     large = generate_large_vault_playlist()
     return {"channels": results, "vault": large}

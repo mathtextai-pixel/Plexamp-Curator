@@ -89,3 +89,38 @@ def test_lookup_result_with_id_is_searched_not_re_added(fake):
     assert result["success"] is True
     assert not fake.state["lidarr_added"]
     assert fake.state["lidarr_commands"] == [{"name": "ArtistSearch", "artistId": 7}]
+
+
+@pytest.fixture
+def autodetect(monkeypatch):
+    """Clear the configured Lidarr folder/profiles so they must be auto-detected."""
+    for key in ("LIDARR_ROOT_FOLDER", "LIDARR_QUALITY_PROFILE_ID", "LIDARR_METADATA_PROFILE_ID"):
+        monkeypatch.setitem(de.CONFIG, key, "")
+    monkeypatch.setattr(de, "_LIDARR_DEFAULTS_CACHE", None)
+
+
+def test_add_refuses_when_lidarr_settings_unknown(fake, autodetect):
+    fake.state["lidarr_lookup"] = [{"artistName": "PUP", "foreignArtistId": "mb-pup"}]
+    real_handle = fake.server.RequestHandlerClass._lidarr
+
+    def no_root_folder(self, method, path, q):
+        if path == "/api/v1/rootfolder":
+            return self._send(503, {})
+        return real_handle(self, method, path, q)
+
+    fake.server.RequestHandlerClass._lidarr = no_root_folder
+    try:
+        result = de.add_to_lidarr("PUP")
+    finally:
+        fake.server.RequestHandlerClass._lidarr = real_handle
+    assert result["success"] is False and "root folder" in result["message"]
+    assert not fake.state["lidarr_added"]
+    assert de._LIDARR_DEFAULTS_CACHE is None  # a failure is not remembered
+
+
+def test_autodetected_settings_are_used_and_cached(fake, autodetect):
+    fake.state["lidarr_lookup"] = [{"artistName": "PUP", "foreignArtistId": "mb-pup"}]
+    assert de.add_to_lidarr("PUP")["success"] is True
+    added = fake.state["lidarr_added"][0]
+    assert added["rootFolderPath"] == "/music" and added["qualityProfileId"] == 1
+    assert de._LIDARR_DEFAULTS_CACHE == ("/music", 1, 1)

@@ -4,6 +4,7 @@ Discovery Engine: Stepping-stone music discovery, Deezer enrichment,
 and Lidarr / Deemix sync.
 """
 
+import logging
 import os
 import re
 import sqlite3
@@ -12,46 +13,19 @@ import urllib.error
 import urllib.parse
 from typing import Any, Callable, List, Optional, Tuple
 
+import db
+from textmatch import normalize
 from config import CONFIG, get_int
 from http_client import get_json, http_error_body, request_json
 
-DB_PATH = os.path.join(CONFIG["DATA_DIR"], "recommendations.db")
+log = logging.getLogger(__name__)
+
 _LIDARR_DEFAULTS_CACHE: Optional[Tuple[str, int, int]] = None
 
 
-def get_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=20.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS recommendations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            artist TEXT NOT NULL,
-            album TEXT NOT NULL,
-            year INTEGER,
-            genre TEXT,
-            reason TEXT,
-            cover_url TEXT,
-            preview_url TEXT,
-            deezer_id TEXT,
-            deezer_url TEXT,
-            deemix_url TEXT,
-            bandcamp_url TEXT,
-            lidarr_status TEXT DEFAULT 'Not Added',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            channel TEXT DEFAULT 'General',
-            UNIQUE(artist, album)
-        )
-        """
-    )
-    # Ensure `channel` column exists on older databases
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(recommendations)").fetchall()}
-    if "channel" not in cols:
-        conn.execute("ALTER TABLE recommendations ADD COLUMN channel TEXT DEFAULT 'General'")
-    conn.commit()
-    return conn
+def get_db() -> sqlite3.Connection:
+    """Kept for existing callers; see db.connect()."""
+    return db.connect()
 
 
 def _deemix_public_url() -> str:
@@ -92,7 +66,7 @@ def fetch_deezer_metadata(artist: str, album: str) -> dict:
                 "deemix_url": deemix_url,
             }
     except Exception as e:
-        print(f"Deezer fetch error for {artist} - {album}: {e}", file=sys.stderr)
+        log.error(f"Deezer fetch error for {artist} - {album}: {e}")
 
     deemix_search = f"{_deemix_public_url()}/#/search/albums/{urllib.parse.quote(artist + ' ' + album)}"
     return {
@@ -108,10 +82,12 @@ def get_lidarr_headers() -> dict:
     return {"X-Api-Key": CONFIG["LIDARR_API_KEY"], "Accept": "application/json"}
 
 
-def _resolve_lidarr_defaults() -> Tuple[str, int, int]:
+def _resolve_lidarr_defaults() -> Optional[Tuple[str, int, int]]:
     """
-    Resolve (rootFolderPath, qualityProfileId, metadataProfileId) from CONFIG or
-    auto-detect from the Lidarr API, caching the result in memory.
+    Resolve (rootFolderPath, qualityProfileId, metadataProfileId) from CONFIG, auto-detecting
+    any missing value from the Lidarr API (first root folder / profile).
+    Only a fully resolved result is cached. Returns None if something could not be
+    determined, so an artist is never added with a guessed folder or profile.
     """
     global _LIDARR_DEFAULTS_CACHE
     if _LIDARR_DEFAULTS_CACHE:
@@ -120,31 +96,32 @@ def _resolve_lidarr_defaults() -> Tuple[str, int, int]:
     root_folder = (CONFIG.get("LIDARR_ROOT_FOLDER") or "").strip()
     qp_str = (CONFIG.get("LIDARR_QUALITY_PROFILE_ID") or "").strip()
     mp_str = (CONFIG.get("LIDARR_METADATA_PROFILE_ID") or "").strip()
-
     quality_id = int(qp_str) if qp_str.isdigit() else 0
     metadata_id = int(mp_str) if mp_str.isdigit() else 0
 
+    def first(endpoint: str) -> Optional[dict]:
+        items = get_json(f"{_lidarr_url()}/api/v1/{endpoint}", headers=get_lidarr_headers(), timeout=5)
+        return items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else None
+
     try:
         if not root_folder:
-            folders = get_json(f"{_lidarr_url()}/api/v1/rootfolder", headers=get_lidarr_headers(), timeout=5)
-            if folders and isinstance(folders, list):
-                root_folder = folders[0].get("path") or "/data/media/Music"
+            root_folder = ((first("rootfolder") or {}).get("path") or "").strip()
         if not quality_id:
-            qps = get_json(f"{_lidarr_url()}/api/v1/qualityprofile", headers=get_lidarr_headers(), timeout=5)
-            if qps and isinstance(qps, list):
-                quality_id = int(qps[0].get("id", 1))
+            quality_id = int((first("qualityprofile") or {}).get("id") or 0)
         if not metadata_id:
-            mps = get_json(f"{_lidarr_url()}/api/v1/metadataprofile", headers=get_lidarr_headers(), timeout=5)
-            if mps and isinstance(mps, list):
-                metadata_id = int(mps[0].get("id", 1))
+            metadata_id = int((first("metadataprofile") or {}).get("id") or 0)
     except Exception as e:
-        print(f"Lidarr profile auto-detect fallback ({e})", file=sys.stderr)
+        log.warning(f"Could not auto-detect Lidarr root folder / profiles: {e}")
+        return None
 
-    _LIDARR_DEFAULTS_CACHE = (
-        root_folder or "/data/media/Music",
-        quality_id or 1,
-        metadata_id or 1,
-    )
+    if not (root_folder and quality_id and metadata_id):
+        log.warning(
+            "Lidarr has no root folder or profiles configured; set LIDARR_ROOT_FOLDER, "
+            "LIDARR_QUALITY_PROFILE_ID and LIDARR_METADATA_PROFILE_ID."
+        )
+        return None
+
+    _LIDARR_DEFAULTS_CACHE = (root_folder, quality_id, metadata_id)
     return _LIDARR_DEFAULTS_CACHE
 
 
@@ -191,19 +168,14 @@ def check_lidarr_status_for_album(artist: str, album: str) -> Optional[str]:
 
         return "Artist Added (Album Missing)"
     except Exception as e:
-        print(f"Lidarr check error for {artist} - {album}: {e}", file=sys.stderr)
+        log.error(f"Lidarr check error for {artist} - {album}: {e}")
         return None
 
 
 def _normalize_artist_name(name: str) -> str:
     """Loose-but-exact comparison key: case, punctuation, '&'/'and' and a leading 'The' are ignored."""
-    n = (name or "").casefold().replace("&", " and ")
-    n = re.sub(r"[.'’]", "", n)  # R.E.M. -> rem, Guns N' Roses -> guns n roses
-    n = re.sub(r"[^\w\s]", " ", n)
-    n = re.sub(r"\s+", " ", n).strip()
-    if n.startswith("the "):
-        n = n[4:]
-    return n
+    n = normalize(name)
+    return n[4:] if n.startswith("the ") else n
 
 
 def _pick_exact_artist(results: Any, artist_name: str) -> Optional[dict]:
@@ -272,7 +244,14 @@ def add_to_lidarr(artist_name: str, album_name: Optional[str] = None) -> dict:
             # Lookup results that already have a Lidarr id are in the library.
             return _trigger_lidarr_artist_search(foreign_id, artist_name)
 
-        root_folder, quality_id, metadata_id = _resolve_lidarr_defaults()
+        defaults = _resolve_lidarr_defaults()
+        if not defaults:
+            return {
+                "success": False,
+                "message": "Could not read Lidarr's root folder / quality profiles, so nothing was added. "
+                           "Check Lidarr, or set LIDARR_ROOT_FOLDER and the profile IDs in .env.",
+            }
+        root_folder, quality_id, metadata_id = defaults
         payload = {
             "artistName": artist_meta.get("artistName"),
             "foreignArtistId": foreign_id,
@@ -408,7 +387,7 @@ def _insert_recommendation_item(conn: sqlite3.Connection, item: Any) -> Optional
     if cur.fetchone():
         return None
 
-    print(f"Discovering: {artist} - {album}...")
+    log.info(f"Discovering: {artist} - {album}...")
     meta = fetch_deezer_metadata(artist, album)
     # Unknown (Lidarr unreachable) is stored as "Not Added"; the next successful sync corrects it.
     status = check_lidarr_status_for_album(artist, album) or "Not Added"
@@ -447,7 +426,7 @@ def populate_and_sync_db():
     for item in SEED_STEPPING_STONES:
         _insert_recommendation_item(conn, item)
     conn.close()
-    print("Database sync complete!")
+    log.info("Database sync complete!")
 
 
 def run_weekly_discovery_crawl(
@@ -505,7 +484,7 @@ def run_weekly_discovery_crawl(
             added.append(res)
 
     conn.close()
-    print(f"  ✓ Weekly discovery crawl added {len(added)} new album recommendations.")
+    log.info(f"✓ Weekly discovery crawl added {len(added)} new album recommendations.")
     return added
 
 

@@ -13,17 +13,17 @@ A job function receives a `progress(message)` callback and returns
 """
 
 import json
+import logging
 import os
 import sqlite3
 import threading
-import traceback
 import uuid
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from config import CONFIG
+import db
 from locks import LockHandle
 
-DB_PATH = os.path.join(CONFIG["DATA_DIR"], "recommendations.db")
+log = logging.getLogger(__name__)
 
 # A job still "running" after this long is reported as stale (its worker most likely died).
 STALE_AFTER_SECONDS = 2 * 60 * 60
@@ -33,38 +33,7 @@ JobFn = Callable[[Callable[[str], None]], JobResult]
 
 
 def _conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=20.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-def init_jobs_table() -> None:
-    conn = _conn()
-    try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                progress TEXT,
-                http_status INTEGER,
-                result TEXT,
-                pid INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        # Keep the table small: drop finished jobs older than a week.
-        conn.execute(
-            "DELETE FROM jobs WHERE status != 'running' AND updated_at < datetime('now', '-7 days')"
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    return db.connect()
 
 
 def _update(job_id: str, **fields: Any) -> None:
@@ -101,14 +70,14 @@ def start_job(kind: str, fn: JobFn, lock: Optional[LockHandle] = None) -> str:
         try:
             _update(job_id, progress=str(message)[:300])
         except sqlite3.Error as e:
-            print(f"[jobs] could not record progress for {kind}: {e}")
+            log.error(f"could not record progress for {kind}: {e}")
 
     def runner() -> None:
         try:
             http_status, payload = fn(progress)
             _update(job_id, status="done", http_status=int(http_status), result=json.dumps(payload))
         except Exception as e:
-            traceback.print_exc()
+            log.exception(f"Job {kind} failed")
             _update(
                 job_id,
                 status="error",
@@ -168,5 +137,3 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
         "result": json.loads(job["result"]) if job["result"] else None,
     }
 
-
-init_jobs_table()

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Crate Remote // Plexamp DJ</title>
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -212,6 +212,24 @@
             transition: all 0.2s;
         }
 
+        .chip, .tile-btn {
+            font-family: inherit;
+            line-height: inherit;
+        }
+        .tile-btn {
+            width: 100%;
+        }
+        .tile-btn > span {
+            display: block;
+        }
+        .tile-btn:disabled {
+            opacity: 0.6;
+            cursor: progress;
+        }
+        .chip:focus-visible, .tile-btn:focus-visible, .btn-generate:focus-visible, .llm-mini-btn:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
         .chip:active {
             background: #242c40;
             color: #fff;
@@ -416,11 +434,11 @@
             </button>
 
             <div class="chips-scroll">
-                <span class="chip" onclick="quickFill('Mumford & Sons and Avett Brothers style fast foot-stomping banjos and soaring choruses')">🌾 Mumford & Avett</span>
-                <span class="chip" onclick="quickFill('Late night drive through misty mountains, acoustic picking and melancholic folk')">🌙 Midnight Drive</span>
-                <span class="chip" onclick="quickFill('Warm 70s analog tape, funky pocket basslines and smoky falsettos like Khruangbin & Leon Bridges')">🎷 Warm Soul</span>
-                <span class="chip" onclick="quickFill('Fast anthemic acoustic punk and singalong emo with cathartic roaring guitars')">🎸 Acoustic Punk</span>
-                <span class="chip" onclick="quickFill('Sun-drenched jangle pop and breezy dream pop hooks like Flipturn & Peach Pit')">✨ Sun Jangle</span>
+                <button type="button" class="chip" onclick="quickFill('Mumford & Sons and Avett Brothers style fast foot-stomping banjos and soaring choruses')">🌾 Mumford & Avett</button>
+                <button type="button" class="chip" onclick="quickFill('Late night drive through misty mountains, acoustic picking and melancholic folk')">🌙 Midnight Drive</button>
+                <button type="button" class="chip" onclick="quickFill('Warm 70s analog tape, funky pocket basslines and smoky falsettos like Khruangbin & Leon Bridges')">🎷 Warm Soul</button>
+                <button type="button" class="chip" onclick="quickFill('Fast anthemic acoustic punk and singalong emo with cathartic roaring guitars')">🎸 Acoustic Punk</button>
+                <button type="button" class="chip" onclick="quickFill('Sun-drenched jangle pop and breezy dream pop hooks like Flipturn & Peach Pit')">✨ Sun Jangle</button>
             </div>
         </div>
 
@@ -449,17 +467,17 @@
 
         <!-- 1-Tap Control Tiles -->
         <div class="grid-actions">
-            <div class="tile-btn" onclick="triggerSurpriseMe()">
-                <div class="tile-icon">🎲</div>
-                <div class="tile-title">Surprise Me</div>
-                <div class="tile-desc">AI curveball from your {{ "{:,}".format(library_track_count) }} library tracks</div>
-            </div>
+            <button type="button" class="tile-btn" onclick="triggerSurpriseMe(this)">
+                <span class="tile-icon" aria-hidden="true">🎲</span>
+                <span class="tile-title">Surprise Me</span>
+                <span class="tile-desc">AI curveball from your {{ "{:,}".format(library_track_count) }} library tracks</span>
+            </button>
 
-            <div class="tile-btn" onclick="triggerRefreshAllChannels()">
-                <div class="tile-icon">🚀</div>
-                <div class="tile-title">Refresh 5 Channels</div>
-                <div class="tile-desc">Update all taste crates in-place with fresh flow</div>
-            </div>
+            <button type="button" class="tile-btn" onclick="triggerRefreshAllChannels(this)">
+                <span class="tile-icon" aria-hidden="true">🚀</span>
+                <span class="tile-title">Refresh 5 Channels</span>
+                <span class="tile-desc">Update all taste crates in-place with fresh flow</span>
+            </button>
         </div>
 
         <div style="text-align:center; margin-top:auto; padding-top:1rem;">
@@ -627,23 +645,27 @@
             }
         }
 
-        async function triggerSurpriseMe() {
+        async function triggerSurpriseMe(tile) {
+            if (tile) tile.disabled = true;
             showToast('🎲 Spinning the vault for a surprise curveball...');
             try {
                 const data = await apiPost('/api/mobile/surprise-me');
                 if (data.success && data.prompt) {
                     document.getElementById('mobile-prompt-input').value = data.prompt;
-                    generateVibePlaylist(data.prompt);
+                    await generateVibePlaylist(data.prompt);
                 } else {
                     showToast('❌ ' + (data.message || 'Error spinning surprise'));
                 }
             } catch (err) {
                 showToast('❌ Network error');
+            } finally {
+                if (tile) tile.disabled = false;
             }
         }
 
-        async function triggerRefreshAllChannels() {
-            showToast('🚀 Refreshing all 5 channels (~30s)...');
+        async function triggerRefreshAllChannels(tile) {
+            if (tile) tile.disabled = true;
+            showToast('🚀 Refreshing all 5 channels...');
             try {
                 const data = await apiPost('/api/playlists/generate-all');
                 if (data.success) {
@@ -654,6 +676,8 @@
                 }
             } catch (err) {
                 showToast('❌ Network error');
+            } finally {
+                if (tile) tile.disabled = false;
             }
         }
 

@@ -195,3 +195,65 @@ def test_provider_setting_is_shared_across_processes(client):
         assert out == "ollama"
     finally:
         gc.set_active_provider("gemini")
+
+
+# --- round 4: restart detection, action locks, health ---------------------------------
+
+def test_running_job_with_live_owner_stays_running(client):
+    release = threading.Event()
+    job_id = jobs.start_job("test", lambda progress: (release.wait(5), (200, {"success": True}))[1])
+    try:
+        assert client.get(f"/api/jobs/{job_id}").get_json()["status"] == "running"
+    finally:
+        release.set()
+    assert wait_for_job(client, job_id)["status"] == "done"
+
+
+def test_job_from_before_a_restart_is_interrupted_even_if_pid_is_reused(client):
+    """Single worker: after a container restart the new worker has the SAME pid as the old one."""
+    job_id = jobs.start_job("test", lambda progress: (200, {"success": True}))
+    wait_for_job(client, job_id)
+    conn = jobs._conn()
+    conn.execute(
+        "UPDATE jobs SET status='running', pid=?, owner=? WHERE id=?",
+        (os.getpid(), f"{os.getpid()}:some-earlier-start-time", job_id),
+    )
+    conn.commit()
+    conn.close()
+    job = client.get(f"/api/jobs/{job_id}").get_json()
+    assert job["status"] == "error"
+    assert "interrupted" in job["result"]["message"]
+
+
+def test_process_identity_of_current_process_is_stable():
+    me = jobs.process_identity(os.getpid())
+    assert me and me == jobs.process_identity(os.getpid())
+
+
+@pytest.mark.parametrize("url,body,lock_name", [
+    ("/api/playlists/generate-from-prompt", {"prompt": "late night soul"}, "job:prompt-playlist"),
+    ("/api/mobile/surprise-me", {}, "job:surprise-me"),
+])
+def test_double_tap_on_ai_actions_gets_409(client, url, body, lock_name):
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with file_lock(lock_name):
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    held.wait(5)
+    try:
+        r = post(client, url, body)
+        assert r.status_code == 409
+    finally:
+        release.set()
+        t.join()
+
+
+def test_healthz(client):
+    r = client.get("/healthz")
+    assert r.status_code == 200 and r.get_json() == {"ok": True}

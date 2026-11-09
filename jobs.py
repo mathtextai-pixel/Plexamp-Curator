@@ -59,8 +59,8 @@ def start_job(kind: str, fn: JobFn, lock: Optional[LockHandle] = None) -> str:
     conn = _conn()
     try:
         conn.execute(
-            "INSERT INTO jobs (id, kind, status, progress, pid) VALUES (?, ?, 'running', ?, ?)",
-            (job_id, kind, "Starting…", os.getpid()),
+            "INSERT INTO jobs (id, kind, status, progress, pid, owner) VALUES (?, ?, 'running', ?, ?, ?)",
+            (job_id, kind, "Starting…", os.getpid(), process_identity(os.getpid())),
         )
         conn.commit()
     finally:
@@ -104,6 +104,34 @@ def _pid_alive(pid: Optional[int]) -> bool:
         return True
 
 
+def process_identity(pid: int) -> Optional[str]:
+    """
+    "pid:start-time" for a running process, or None if it isn't running.
+    The start time (from /proc on Linux) tells a restarted worker apart from the old one:
+    with a single Gunicorn worker the pid is the same after every container restart, so a
+    pid alone would make jobs interrupted by a restart look alive. Without /proc (macOS
+    dev runs) this falls back to the pid.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+        # Field 22 (starttime) comes after the parenthesised command name, which may contain spaces.
+        start_time = stat.rsplit(")", 1)[1].split()[19]
+        return f"{pid}:{start_time}"
+    except FileNotFoundError:
+        if os.path.isdir("/proc/self"):
+            return None  # Linux, and the process is gone
+        return str(pid) if _pid_alive(pid) else None
+    except (OSError, IndexError):
+        return str(pid) if _pid_alive(pid) else None
+
+
+def _owner_alive(job: Dict[str, Any]) -> bool:
+    if job.get("owner"):
+        return process_identity(job["pid"]) == job["owner"]
+    return _pid_alive(job["pid"])  # rows created before the owner column existed
+
+
 def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     conn = _conn()
     try:
@@ -121,9 +149,9 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
 
     job = dict(row)
     if job["status"] == "running" and (
-        not _pid_alive(job["pid"]) or (job["age_seconds"] or 0) > STALE_AFTER_SECONDS
+        not _owner_alive(job) or (job["age_seconds"] or 0) > STALE_AFTER_SECONDS
     ):
-        message = "The worker running this job stopped before it finished. Please try again."
+        message = "This job was interrupted (the server restarted or the worker stopped). Please try again."
         _update(job_id, status="error", http_status=500,
                 result=json.dumps({"success": False, "message": message}))
         job.update(status="error", http_status=500, result=json.dumps({"success": False, "message": message}))

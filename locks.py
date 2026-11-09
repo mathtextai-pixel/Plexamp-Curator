@@ -97,3 +97,5 @@ REFRESH_JOB_LOCK = "job:refresh-playlists"   # channel / vault playlist refreshe
 REINDEX_JOB_LOCK = "job:reindex"
 LIDARR_SYNC_JOB_LOCK = "job:lidarr-sync"
 DISCOVERY_JOB_LOCK = "job:discovery"
+PROMPT_PLAYLIST_JOB_LOCK = "job:prompt-playlist"  # AI DJ prompt -> "The Daily Vibe"
+SURPRISE_JOB_LOCK = "job:surprise-me"

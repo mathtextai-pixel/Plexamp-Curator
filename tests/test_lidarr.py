@@ -124,3 +124,43 @@ def test_autodetected_settings_are_used_and_cached(fake, autodetect):
     added = fake.state["lidarr_added"][0]
     assert added["rootFolderPath"] == "/music" and added["qualityProfileId"] == 1
     assert de._LIDARR_DEFAULTS_CACHE == ("/music", 1, 1)
+
+
+# Real Lidarr data (2026-11): MusicBrainz has three different artists named "PUP".
+PUP_LOOKUP = [
+    {"artistName": "Pup", "foreignArtistId": "mb-pup-90s", "disambiguation": "90s Canadian band"},
+    {"artistName": "PUP", "foreignArtistId": "mb-pup-punk", "disambiguation": "Canadian punk band"},
+    {"artistName": "Pup", "foreignArtistId": "mb-pup-rapper", "disambiguation": "Rapper"},
+    {"artistName": "Pup Tent", "foreignArtistId": "mb-pup-tent"},
+]
+MORBID_STUFF_LOOKUP = [
+    {"title": "Morbid Stuff", "artist": {"artistName": "PUP", "foreignArtistId": "mb-pup-punk"}},
+    {"title": "Pup", "artist": {"artistName": "Fenton", "foreignArtistId": "mb-fenton"}},
+]
+
+
+def test_same_named_artists_are_resolved_by_album(fake):
+    fake.state["lidarr_lookup"] = PUP_LOOKUP
+    fake.state["lidarr_album_lookup"] = MORBID_STUFF_LOOKUP
+    result = de.add_to_lidarr("PUP", "Morbid Stuff")
+    assert result["success"] is True
+    assert fake.state["lidarr_added"][0]["foreignArtistId"] == "mb-pup-punk"  # not the first "Pup"
+
+
+def test_same_named_artists_prefer_the_one_already_in_lidarr(fake):
+    lookup = [dict(c) for c in PUP_LOOKUP]
+    lookup[1]["id"] = 42
+    fake.state["lidarr_lookup"] = lookup
+    fake.state["lidarr_artists"] = [{"id": 42, "artistName": "PUP", "foreignArtistId": "mb-pup-punk"}]
+    result = de.add_to_lidarr("PUP", "Some Album Lidarr Doesn't Know")
+    assert result["success"] is True
+    assert not fake.state["lidarr_added"]
+    assert fake.state["lidarr_commands"] == [{"name": "ArtistSearch", "artistId": 42}]
+
+
+def test_same_named_artists_without_a_way_to_decide_are_refused(fake):
+    fake.state["lidarr_lookup"] = PUP_LOOKUP
+    result = de.add_to_lidarr("PUP", "Unknown Album")
+    assert result["success"] is False
+    assert "Canadian punk band" in result["message"] and "Rapper" in result["message"]
+    assert not fake.state["lidarr_added"]

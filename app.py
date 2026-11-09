@@ -33,8 +33,10 @@ from cron import CronError, CronSchedule
 from locks import (
     DISCOVERY_JOB_LOCK,
     LIDARR_SYNC_JOB_LOCK,
+    PROMPT_PLAYLIST_JOB_LOCK,
     REFRESH_JOB_LOCK,
     REINDEX_JOB_LOCK,
+    SURPRISE_JOB_LOCK,
     LockBusy,
     acquire,
     file_lock,
@@ -258,6 +260,12 @@ def index():
 # Quick, synchronous API endpoints
 # ---------------------------------------------------------------------------
 
+@app.route("/healthz")
+def healthz():
+    """Liveness probe for Docker: answers without touching the database or any service."""
+    return jsonify({"ok": True})
+
+
 @app.route("/api/channels")
 def api_channels():
     return jsonify(_public_channel_defs())
@@ -409,8 +417,8 @@ def api_generate_from_prompt():
             "llm_status": gemini_curator.get_llm_status(),
         }
 
-    # No job-level lock: writes to "The Daily Vibe" are serialised by the per-playlist lock.
-    return _start_job("prompt-playlist", work)
+    # One at a time: a double-tap would otherwise pay for two LLM runs that overwrite each other.
+    return _start_job("prompt-playlist", work, PROMPT_PLAYLIST_JOB_LOCK, "An AI DJ playlist")
 
 
 @app.route("/api/mobile/surprise-me", methods=["POST"])
@@ -442,7 +450,7 @@ Return JSON:
         ]
         return 200, {"success": True, "prompt": random.choice(fallback_prompts)}
 
-    return _start_job("surprise-me", work)
+    return _start_job("surprise-me", work, SURPRISE_JOB_LOCK, "A Surprise Me pick")
 
 
 @app.route("/api/playlists/generate-all", methods=["POST"])

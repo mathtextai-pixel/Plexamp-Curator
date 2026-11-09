@@ -26,6 +26,7 @@ def fresh_state() -> Dict[str, Any]:
         "lidarr_artists": [],     # artists already in Lidarr: {"id", "artistName", "foreignArtistId"}
         "lidarr_albums": {},      # artistId -> [album dicts]
         "lidarr_lookup": [],      # results for /artist/lookup
+        "lidarr_album_lookup": [],  # results for /album/lookup
         "lidarr_add_error": None, # (status, body) to return from POST /artist
         "lidarr_commands": [],
         "lidarr_added": [],
@@ -158,6 +159,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, st["lidarr_albums"].get(artist_id, []))
         if path == "/api/v1/artist/lookup":
             return self._send(200, st["lidarr_lookup"])
+        if path == "/api/v1/album/lookup":
+            return self._send(200, st["lidarr_album_lookup"])
         if path == "/api/v1/artist" and method == "POST":
             if st["lidarr_add_error"]:
                 code, body = st["lidarr_add_error"]

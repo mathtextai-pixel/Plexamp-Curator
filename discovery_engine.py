@@ -14,7 +14,7 @@ import urllib.parse
 from typing import Any, Callable, List, Optional, Tuple
 
 import db
-from textmatch import normalize
+from textmatch import contains_phrase, normalize
 from config import CONFIG, get_int
 from http_client import get_json, http_error_body, request_json
 
@@ -178,15 +178,68 @@ def _normalize_artist_name(name: str) -> str:
     return n[4:] if n.startswith("the ") else n
 
 
-def _pick_exact_artist(results: Any, artist_name: str) -> Optional[dict]:
-    """Return the lookup result whose name matches `artist_name`, or None. Never guesses."""
+def _exact_name_candidates(results: Any, artist_name: str) -> List[dict]:
+    """Lookup results whose name matches `artist_name` (MusicBrainz often has several artists with the same name)."""
     if not isinstance(results, list):
-        return None
+        return []
     wanted = _normalize_artist_name(artist_name)
-    for r in results:
-        if isinstance(r, dict) and r.get("foreignArtistId") and _normalize_artist_name(r.get("artistName") or "") == wanted:
-            return r
-    return None
+    return [
+        r for r in results
+        if isinstance(r, dict) and r.get("foreignArtistId") and _normalize_artist_name(r.get("artistName") or "") == wanted
+    ]
+
+
+def _artist_ids_with_album(artist_name: str, album_name: str, candidate_ids: set) -> set:
+    """Which of `candidate_ids` has an album matching `album_name`, according to Lidarr's album lookup."""
+    term = urllib.parse.quote(f"{artist_name} {album_name}")
+    albums = get_json(f"{_lidarr_url()}/api/v1/album/lookup?term={term}", headers=get_lidarr_headers(), timeout=15)
+    found = set()
+    for a in albums if isinstance(albums, list) else []:
+        artist_id = ((a or {}).get("artist") or {}).get("foreignArtistId")
+        title = (a or {}).get("title") or ""
+        if artist_id in candidate_ids and (contains_phrase(title, album_name) or contains_phrase(album_name, title)):
+            found.add(artist_id)
+    return found
+
+
+def _describe(candidate: dict) -> str:
+    disambiguation = (candidate.get("disambiguation") or "").strip()
+    return f"{candidate.get('artistName')} ({disambiguation})" if disambiguation else str(candidate.get("artistName"))
+
+
+def _choose_artist(results: Any, artist_name: str, album_name: Optional[str]) -> Tuple[Optional[dict], str]:
+    """
+    Pick the lookup result that is really the recommended artist. Returns (artist, "") or (None, reason).
+    Never guesses between same-named artists: the album decides, then "already in Lidarr";
+    otherwise the add is refused.
+    """
+    candidates = _exact_name_candidates(results, artist_name)
+    if not candidates:
+        closest = [r.get("artistName") for r in (results or [])[:3] if isinstance(r, dict) and r.get("artistName")]
+        hint = f" Closest matches: {', '.join(closest)}." if closest else ""
+        return None, f"No exact Lidarr match for '{artist_name}', so nothing was added.{hint} Add it manually in Lidarr if one of these is right."
+    if len(candidates) == 1:
+        return candidates[0], ""
+
+    by_id = {c["foreignArtistId"]: c for c in candidates}
+    if album_name:
+        try:
+            with_album = _artist_ids_with_album(artist_name, album_name, set(by_id))
+        except Exception as e:
+            log.warning(f"Lidarr album lookup failed while disambiguating '{artist_name}': {e}")
+            with_album = set()
+        if len(with_album) == 1:
+            return by_id[with_album.pop()], ""
+
+    in_library = [c for c in candidates if c.get("id")]
+    if len(in_library) == 1:
+        return in_library[0], ""
+
+    names = "; ".join(_describe(c) for c in candidates[:5])
+    return None, (
+        f"Several artists are called '{artist_name}' ({names}) and the album didn't settle which one, "
+        "so nothing was added. Add the right one manually in Lidarr."
+    )
 
 
 def _trigger_lidarr_artist_search(foreign_artist_id: Optional[str], artist_name: str) -> dict:
@@ -220,8 +273,9 @@ def _trigger_lidarr_artist_search(foreign_artist_id: Optional[str], artist_name:
 def add_to_lidarr(artist_name: str, album_name: Optional[str] = None) -> dict:
     """
     Add an artist to Lidarr (monitoring their whole catalogue) and search for missing albums.
-    Only adds when the MusicBrainz lookup returns an exact name match, so an ambiguous
-    name never pulls in a different artist's discography.
+    Only adds an exact name match; when MusicBrainz has several artists with that name,
+    the recommended album decides (see _choose_artist), so a namesake's discography is
+    never pulled in.
     """
     foreign_id: Optional[str] = None
     try:
@@ -230,14 +284,9 @@ def add_to_lidarr(artist_name: str, album_name: Optional[str] = None) -> dict:
         if not results:
             return {"success": False, "message": f"Artist '{artist_name}' not found on MusicBrainz/Lidarr"}
 
-        artist_meta = _pick_exact_artist(results, artist_name)
+        artist_meta, reason = _choose_artist(results, artist_name, album_name)
         if not artist_meta:
-            closest = [r.get("artistName") for r in results[:3] if isinstance(r, dict) and r.get("artistName")]
-            hint = f" Closest matches: {', '.join(closest)}." if closest else ""
-            return {
-                "success": False,
-                "message": f"No exact Lidarr match for '{artist_name}', so nothing was added.{hint} Add it manually in Lidarr if one of these is right.",
-            }
+            return {"success": False, "message": reason}
 
         foreign_id = artist_meta.get("foreignArtistId")
         if artist_meta.get("id"):

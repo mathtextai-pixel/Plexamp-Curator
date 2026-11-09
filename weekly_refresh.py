@@ -41,8 +41,30 @@ def _timestamp() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUPS = 3  # weekly_refresh.log.1 .. .3
+
+
+def _rotate_log_file() -> None:
+    """Keep the run log small: once it passes LOG_MAX_BYTES, shift .1 -> .2 -> .3 and start fresh."""
+    try:
+        if os.path.getsize(LOG_FILE) < LOG_MAX_BYTES:
+            return
+    except FileNotFoundError:
+        return
+    for i in range(LOG_BACKUPS - 1, 0, -1):
+        older = f"{LOG_FILE}.{i}"
+        if os.path.exists(older):
+            os.replace(older, f"{LOG_FILE}.{i + 1}")
+    os.replace(LOG_FILE, f"{LOG_FILE}.1")
+
+
 def _append_log_file(lines: List[str]) -> None:
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    try:
+        _rotate_log_file()
+    except OSError as e:
+        log.warning(f"Could not rotate {LOG_FILE}: {e}")
     with open(LOG_FILE, "a") as f:
         f.writelines(lines)
 

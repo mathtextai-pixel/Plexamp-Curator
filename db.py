@@ -85,6 +85,7 @@ _SCHEMA = [
         http_status INTEGER,
         result TEXT,
         pid INTEGER,
+        owner TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
@@ -95,6 +96,7 @@ _SCHEMA = [
 _ADDED_COLUMNS = [
     ("recommendations", "channel", "TEXT DEFAULT 'General'"),
     ("gemini_usage", "status", "TEXT NOT NULL DEFAULT 'final'"),
+    ("jobs", "owner", "TEXT"),
 ]
 
 # Indexes from earlier versions that queries no longer use.

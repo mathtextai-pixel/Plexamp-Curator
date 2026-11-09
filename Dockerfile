@@ -28,7 +28,7 @@ USER app
 EXPOSE 5050
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -fsS http://localhost:5050/api/llm-status > /dev/null || exit 1
+  CMD curl -fsS http://localhost:5050/healthz > /dev/null || exit 1
 
 # ONE worker process with 8 threads, on purpose. On Docker Desktop for Mac, the ./data bind
 # mount does not enforce file locks between processes, so two workers could both take

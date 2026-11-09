@@ -57,3 +57,15 @@ def test_one_broken_channel_does_not_stop_other_channels(monkeypatch):
     results = me.generate_channel_playlists()
     assert built == list(me.CHANNEL_DEFINITIONS)
     assert [r["channel_key"] for r in results] == [k for k in me.CHANNEL_DEFINITIONS if k != "pop_punk"]
+
+
+def test_log_file_rotates(monkeypatch, tmp_path):
+    log_file = tmp_path / "weekly_refresh.log"
+    monkeypatch.setattr(wr, "LOG_FILE", str(log_file))
+    monkeypatch.setattr(wr, "LOG_MAX_BYTES", 100)
+    for i in range(6):
+        wr._append_log_file([f"run {i} " + "x" * 120 + "\n"])
+    assert "run 5" in log_file.read_text()
+    assert "run 4" in (tmp_path / "weekly_refresh.log.1").read_text()
+    assert (tmp_path / "weekly_refresh.log.3").exists()
+    assert not (tmp_path / "weekly_refresh.log.4").exists()

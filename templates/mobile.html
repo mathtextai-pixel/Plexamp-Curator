@@ -512,10 +512,16 @@
             return pollJob(data.job_id, onProgress || (msg => showToast('⏳ ' + msg)));
         }
 
+        const JOB_POLL_LIMIT_MS = 20 * 60 * 1000;
+
         async function pollJob(jobId, onProgress) {
             let lastProgress = '';
             let failures = 0;
+            const deadline = Date.now() + JOB_POLL_LIMIT_MS;
             while (true) {
+                if (Date.now() > deadline) {
+                    return {success: false, message: 'Still running after 20 minutes. It may finish in the background; check the server log.'};
+                }
                 await sleep(1500);
                 let job;
                 try {

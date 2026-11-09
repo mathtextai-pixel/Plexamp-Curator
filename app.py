@@ -21,6 +21,7 @@ import discovery_engine
 import gemini_curator
 import weekly_refresh
 from config import CONFIG, get_int, public_config
+from locks import REFRESH_JOB_LOCK, LockBusy, file_lock
 from music_excavator import (
     CHANNEL_DEFINITIONS,
     append_to_plex_playlist,
@@ -64,6 +65,13 @@ def _public_channel_defs() -> dict:
         }
         for key, cdef in CHANNEL_DEFINITIONS.items()
     }
+
+
+def _refresh_busy_response():
+    return jsonify({
+        "success": False,
+        "message": "A playlist refresh is already running. Try again when it finishes.",
+    }), 409
 
 
 def is_mobile_request(req) -> bool:
@@ -252,7 +260,11 @@ def api_save_permanent():
 
 @app.route("/api/playlists/generate-all", methods=["POST"])
 def api_generate_all():
-    playlists = generate_channel_playlists(rotate=True, use_gemini_flow=True)
+    try:
+        with file_lock(REFRESH_JOB_LOCK, timeout=0):
+            playlists = generate_channel_playlists(rotate=True, use_gemini_flow=True)
+    except LockBusy:
+        return _refresh_busy_response()
     return jsonify({
         "success": True,
         "playlists": playlists,
@@ -262,7 +274,13 @@ def api_generate_all():
 
 @app.route("/api/playlists/generate/<channel_key>", methods=["POST"])
 def api_generate_single(channel_key):
-    pls = generate_channel_playlists(channel_key, rotate=True, use_gemini_flow=True)
+    if channel_key not in CHANNEL_DEFINITIONS:
+        return jsonify({"success": False, "message": "Channel not found"}), 404
+    try:
+        with file_lock(REFRESH_JOB_LOCK, timeout=0):
+            pls = generate_channel_playlists(channel_key, rotate=True, use_gemini_flow=True)
+    except LockBusy:
+        return _refresh_busy_response()
     if pls:
         return jsonify({
             "success": True,
@@ -272,12 +290,16 @@ def api_generate_single(channel_key):
             "album_count": pls[0]["album_count"],
             "llm_status": gemini_curator.get_llm_status(),
         })
-    return jsonify({"success": False, "message": "Channel not found"}), 404
+    return jsonify({"success": False, "message": "Could not update channel playlist (see server log)"}), 500
 
 
 @app.route("/api/vault/large-playlist", methods=["POST"])
 def api_vault_large_playlist():
-    result = generate_large_vault_playlist(rotate=True)
+    try:
+        with file_lock(REFRESH_JOB_LOCK, timeout=0):
+            result = generate_large_vault_playlist(rotate=True)
+    except LockBusy:
+        return _refresh_busy_response()
     if result:
         return jsonify({
             "success": True,
@@ -322,14 +344,28 @@ def api_sync_lidarr():
     recs = discovery_engine.get_all_recommendations()
     conn = discovery_engine.get_db()
     updated = 0
+    unreachable = 0
     for r in recs:
         status = discovery_engine.check_lidarr_status_for_album(r["artist"], r["album"])
+        if status is None:
+            # Lidarr error: keep the last known status rather than resetting it to "Not Added".
+            unreachable += 1
+            continue
         if status != r["lidarr_status"]:
             conn.execute("UPDATE recommendations SET lidarr_status=? WHERE id=?", (status, r["id"]))
             updated += 1
     conn.commit()
     conn.close()
-    return jsonify({"success": True, "message": f"Updated Lidarr status for {updated} albums"})
+
+    if recs and unreachable == len(recs):
+        return jsonify({
+            "success": False,
+            "message": "Could not reach Lidarr; no statuses were changed.",
+        }), 502
+    message = f"Updated Lidarr status for {updated} albums"
+    if unreachable:
+        message += f" ({unreachable} could not be checked and were left unchanged)"
+    return jsonify({"success": True, "message": message})
 
 
 @app.route("/api/vault/add-track", methods=["POST"])

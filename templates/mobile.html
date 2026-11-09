@@ -614,7 +614,7 @@
                     if (data.llm_status) updateMobileLlmUI(data.llm_status);
                     showToast(`✓ All ${data.playlists.length} channel mixtapes updated in Plexamp!`);
                 } else {
-                    showToast('❌ Error refreshing channels');
+                    showToast('❌ ' + (data.message || 'Error refreshing channels'));
                 }
             } catch (err) {
                 showToast('❌ Network error');

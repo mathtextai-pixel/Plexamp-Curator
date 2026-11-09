@@ -4,17 +4,17 @@ Music Excavator: Mine your unplayed Plex vault and discover new music
 powered by Tautulli play history and Plex Media Server.
 """
 
-import json
 import os
 import random
 import sqlite3
 import time
 import urllib.parse
-import urllib.request
 from collections import Counter
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config import CONFIG, get_int
+from http_client import get_json, request_json, request_raw
+from locks import file_lock
 
 DB_PATH = os.path.join(CONFIG["DATA_DIR"], "recommendations.db")
 _CACHED_MACHINE_ID: Optional[str] = None
@@ -45,11 +45,9 @@ def get_tautulli_recent_plays(limit: int = 500) -> List[dict]:
         f"{_tautulli_url()}/api/v2?"
         f"apikey={CONFIG['TAUTULLI_KEY']}&cmd=get_history&media_type=track&length={limit}"
     )
-    req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            return data.get("response", {}).get("data", {}).get("data", [])
+        data = get_json(url, timeout=10)
+        return (data or {}).get("response", {}).get("data", {}).get("data", []) or []
     except Exception as e:
         print(f"Warning fetching Tautulli history: {e}")
         return []
@@ -121,11 +119,9 @@ def get_unplayed_vault_albums(limit: int = 1000) -> List[dict]:
         f"{_plex_url()}/library/sections/{_music_section_id()}/all?"
         f"type=9&unwatched=1&X-Plex-Container-Start=0&X-Plex-Container-Size={limit}"
     )
-    req = urllib.request.Request(url, headers=get_plex_headers())
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            items = data.get("MediaContainer", {}).get("Metadata", [])
+        data = get_json(url, headers=get_plex_headers(), timeout=15)
+        items = (data or {}).get("MediaContainer", {}).get("Metadata", []) or []
     except Exception as e:
         print(f"Error fetching unplayed vault albums: {e}")
         return []
@@ -148,38 +144,141 @@ def get_plex_machine_id() -> Optional[str]:
     global _CACHED_MACHINE_ID
     if _CACHED_MACHINE_ID:
         return _CACHED_MACHINE_ID
-    id_url = f"{_plex_url()}/identity"
-    req_id = urllib.request.Request(id_url, headers=get_plex_headers())
     try:
-        with urllib.request.urlopen(req_id, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            _CACHED_MACHINE_ID = data.get("MediaContainer", {}).get("machineIdentifier")
-            return _CACHED_MACHINE_ID
+        data = get_json(f"{_plex_url()}/identity", headers=get_plex_headers(), timeout=10)
+        _CACHED_MACHINE_ID = (data or {}).get("MediaContainer", {}).get("machineIdentifier")
+        return _CACHED_MACHINE_ID
     except Exception as e:
         print(f"Error fetching Plex machine ID: {e}")
         return None
 
 
+class PlexError(Exception):
+    """A Plex request failed (as opposed to a lookup that found nothing)."""
+
+
+def _is_truthy(value: Any) -> bool:
+    return value in (True, 1, "1", "true", "True")
+
+
+def _playlist_lock_name(title: str) -> str:
+    return f"plex-playlist:{title.strip().lower()}"
+
+
+def _items_uri(machine_id: str, rating_keys: List[str]) -> str:
+    return f"server://{machine_id}/com.plexapp.plugins.library/library/metadata/{','.join(rating_keys)}"
+
+
 def find_plex_playlist_by_title(title: str) -> Optional[dict]:
-    """Find an existing playlist in Plex matching title."""
-    url = f"{_plex_url()}/playlists"
-    req = urllib.request.Request(url, headers=get_plex_headers())
+    """
+    Find an existing regular (non-smart) audio playlist in Plex by title.
+    Returns None only when Plex answered and no playlist matched.
+    Raises PlexError when the playlist list could not be fetched, so callers never
+    mistake a transient Plex error for "playlist doesn't exist" and create a duplicate.
+    """
+    url = f"{_plex_url()}/playlists?playlistType=audio"
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            for pl in data.get("MediaContainer", {}).get("Metadata", []):
-                if pl.get("title", "").strip().lower() == title.strip().lower():
-                    return pl
+        data = get_json(url, headers=get_plex_headers(), timeout=10)
     except Exception as e:
-        print(f"Error searching playlists: {e}")
+        raise PlexError(f"could not list Plex playlists: {e}") from e
+
+    wanted = title.strip().lower()
+    for pl in (data or {}).get("MediaContainer", {}).get("Metadata", []) or []:
+        if (pl.get("playlistType") or "audio") != "audio" or _is_truthy(pl.get("smart")):
+            continue
+        if (pl.get("title") or "").strip().lower() == wanted:
+            return pl
     return None
+
+
+def _fetch_playlist_info(pl_id: str) -> dict:
+    data = get_json(f"{_plex_url()}/playlists/{pl_id}", headers=get_plex_headers(), timeout=10)
+    return ((data or {}).get("MediaContainer", {}).get("Metadata") or [{}])[0]
+
+
+def _playlist_result(info: dict, fallback_title: str, fallback_key: str, fallback_count: int) -> dict:
+    return {
+        "title": info.get("title") or fallback_title,
+        "ratingKey": str(info.get("ratingKey") or fallback_key),
+        "leafCount": info.get("leafCount", fallback_count),
+    }
+
+
+def _replace_playlist_items_in_place(pl_id: str, title: str, items_uri: str, expected_count: int) -> Optional[dict]:
+    """
+    Clear and refill an existing playlist, keeping its ratingKey (so Plexamp pins,
+    shortcuts and downloads survive). Never falls back to creating a new playlist:
+    on failure the playlist is left as-is and None is returned.
+    """
+    base = f"{_plex_url()}/playlists/{pl_id}"
+
+    # 1. Clear existing items. Clearing twice is harmless, so timeouts may be retried.
+    try:
+        request_raw("DELETE", f"{base}/items", headers=get_plex_headers(), timeout=15,
+                    retries=2, retry_on_timeout=True)
+    except Exception as e:
+        print(f"Error clearing playlist '{title}' (ratingKey={pl_id}): {e}. Playlist left unchanged.")
+        return None
+
+    # 2. Refill. PUT appends, so it is only re-sent once Plex confirms the playlist is still empty.
+    put_url = f"{base}/items?uri={urllib.parse.quote(items_uri, safe='')}"
+    for attempt in (1, 2):
+        try:
+            request_raw("PUT", put_url, headers=get_plex_headers(), timeout=30, retries=0)
+            break
+        except Exception as e:
+            print(f"Warning: adding items to '{title}' failed on attempt {attempt} ({e}); checking playlist state...")
+            try:
+                current = _fetch_playlist_info(pl_id)
+            except Exception as e2:
+                print(f"Error: could not verify playlist '{title}' (ratingKey={pl_id}) after failed update: {e2}")
+                return None
+            if int(current.get("leafCount") or 0) > 0:
+                break  # Plex applied the PUT even though the response was lost
+            if attempt == 2:
+                print(
+                    f"Error: playlist '{title}' (ratingKey={pl_id}) is empty after a failed update. "
+                    "It was NOT recreated, so its ratingKey and pins are preserved; re-run to refill it."
+                )
+                return None
+
+    # 3. Read back updated metadata (best effort; the update itself already succeeded).
+    try:
+        info = _fetch_playlist_info(pl_id)
+    except Exception as e:
+        print(f"Warning: updated playlist '{title}' but could not read it back: {e}")
+        info = {}
+    return _playlist_result(info, title, pl_id, expected_count)
+
+
+def _create_playlist(title: str, items_uri: str) -> Optional[dict]:
+    params = urllib.parse.urlencode({
+        "type": "audio",
+        "title": title,
+        "smart": 0,
+        "uri": items_uri,
+    })
+    try:
+        # Not idempotent: a retried POST could create a second playlist.
+        data = request_json("POST", f"{_plex_url()}/playlists?{params}", headers=get_plex_headers(),
+                            timeout=15, retries=0)
+    except Exception as e:
+        print(f"Error creating playlist '{title}': {e}")
+        return None
+    pl = ((data or {}).get("MediaContainer", {}).get("Metadata") or [{}])[0]
+    if not pl.get("ratingKey"):
+        print(f"Error creating playlist '{title}': Plex returned no ratingKey")
+        return None
+    return _playlist_result(pl, title, "", 0)
 
 
 def create_or_replace_plex_playlist(title: str, rating_keys: List[str]) -> Optional[dict]:
     """
     Create or update a playlist in Plex containing albums/tracks by rating key.
-    Updates existing playlists IN-PLACE (clearing items then adding new ones)
-    so the playlist ratingKey, Plexamp pins, and downloads are preserved.
+    Existing playlists are updated IN-PLACE (clear items, then add new ones) so the
+    playlist ratingKey, Plexamp pins, and downloads are preserved. A new playlist is
+    only created when Plex confirms none with this title exists.
+    Writes to the same playlist are serialised across workers and threads.
     """
     clean_keys = [str(k) for k in rating_keys if k]
     if not clean_keys:
@@ -188,91 +287,50 @@ def create_or_replace_plex_playlist(title: str, rating_keys: List[str]) -> Optio
     machine_id = get_plex_machine_id()
     if not machine_id:
         return None
+    items_uri = _items_uri(machine_id, clean_keys)
 
-    items_uri = f"server://{machine_id}/com.plexapp.plugins.library/library/metadata/{','.join(clean_keys)}"
-    existing = find_plex_playlist_by_title(title)
-
-    if existing and existing.get("ratingKey"):
-        pl_id = existing["ratingKey"]
+    with file_lock(_playlist_lock_name(title)):
         try:
-            # 1. Clear existing items without deleting the playlist container
-            clear_url = f"{_plex_url()}/playlists/{pl_id}/items"
-            req_clear = urllib.request.Request(clear_url, headers=get_plex_headers(), method="DELETE")
-            with urllib.request.urlopen(req_clear, timeout=15):
-                pass
+            existing = find_plex_playlist_by_title(title)
+        except PlexError as e:
+            print(f"Error: {e}. Not touching playlist '{title}' to avoid creating a duplicate.")
+            return None
 
-            # 2. Repopulate with new items in-place
-            put_url = f"{_plex_url()}/playlists/{pl_id}/items?uri={urllib.parse.quote(items_uri, safe='')}"
-            req_put = urllib.request.Request(put_url, headers=get_plex_headers(), method="PUT")
-            with urllib.request.urlopen(req_put, timeout=15):
-                pass
-
-            # 3. Fetch updated metadata
-            info_url = f"{_plex_url()}/playlists/{pl_id}"
-            req_info = urllib.request.Request(info_url, headers=get_plex_headers())
-            with urllib.request.urlopen(req_info, timeout=10) as rinfo:
-                info_data = json.loads(rinfo.read().decode("utf-8", errors="replace"))
-                pl = info_data.get("MediaContainer", {}).get("Metadata", [{}])[0]
-                return {
-                    "title": pl.get("title", title),
-                    "ratingKey": str(pl.get("ratingKey", pl_id)),
-                    "leafCount": pl.get("leafCount", len(clean_keys)),
-                }
-        except Exception as e:
-            print(f"Warning updating playlist '{title}' in-place ({e}); falling back to recreate.")
-
-    # Create fresh playlist if none existed (or in-place failed)
-    params = urllib.parse.urlencode({
-        "type": "audio",
-        "title": title,
-        "smart": 0,
-        "uri": items_uri,
-    })
-    post_url = f"{_plex_url()}/playlists?{params}"
-    req_post = urllib.request.Request(post_url, headers=get_plex_headers(), method="POST")
-    try:
-        with urllib.request.urlopen(req_post, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            pl = data.get("MediaContainer", {}).get("Metadata", [{}])[0]
-            return {
-                "title": pl.get("title"),
-                "ratingKey": str(pl.get("ratingKey")),
-                "leafCount": pl.get("leafCount"),
-            }
-    except Exception as e:
-        print(f"Error creating playlist: {e}")
-        return None
+        if existing and existing.get("ratingKey"):
+            return _replace_playlist_items_in_place(str(existing["ratingKey"]), title, items_uri, len(clean_keys))
+        return _create_playlist(title, items_uri)
 
 
 def append_to_plex_playlist(title: str, rating_key: str) -> Optional[dict]:
     """Append a single album or track to an existing playlist, or create it if not found."""
-    existing = find_plex_playlist_by_title(title)
-    if not existing:
-        return create_or_replace_plex_playlist(title, [rating_key])
-
-    pl_id = existing["ratingKey"]
     machine_id = get_plex_machine_id()
     if not machine_id:
         return None
-    item_uri = f"server://{machine_id}/com.plexapp.plugins.library/library/metadata/{rating_key}"
+    item_uri = _items_uri(machine_id, [str(rating_key)])
 
-    put_url = f"{_plex_url()}/playlists/{pl_id}/items?uri={urllib.parse.quote(item_uri, safe='')}"
-    req_put = urllib.request.Request(put_url, headers=get_plex_headers(), method="PUT")
-    try:
-        with urllib.request.urlopen(req_put, timeout=10):
-            info_url = f"{_plex_url()}/playlists/{pl_id}"
-            req_info = urllib.request.Request(info_url, headers=get_plex_headers())
-            with urllib.request.urlopen(req_info, timeout=10) as rinfo:
-                info_data = json.loads(rinfo.read().decode("utf-8", errors="replace"))
-                pl = info_data.get("MediaContainer", {}).get("Metadata", [{}])[0]
-                return {
-                    "title": pl.get("title"),
-                    "ratingKey": str(pl.get("ratingKey")),
-                    "leafCount": pl.get("leafCount"),
-                }
-    except Exception as e:
-        print(f"Error appending to playlist: {e}")
-        return None
+    with file_lock(_playlist_lock_name(title)):
+        try:
+            existing = find_plex_playlist_by_title(title)
+        except PlexError as e:
+            print(f"Error: {e}. Not appending to '{title}' to avoid creating a duplicate.")
+            return None
+        if not existing or not existing.get("ratingKey"):
+            return _create_playlist(title, item_uri)
+
+        pl_id = str(existing["ratingKey"])
+        put_url = f"{_plex_url()}/playlists/{pl_id}/items?uri={urllib.parse.quote(item_uri, safe='')}"
+        try:
+            # PUT appends: never retried, or the item could be added twice.
+            request_raw("PUT", put_url, headers=get_plex_headers(), timeout=10, retries=0)
+        except Exception as e:
+            print(f"Error appending to playlist '{title}': {e}")
+            return None
+        try:
+            info = _fetch_playlist_info(pl_id)
+        except Exception as e:
+            print(f"Warning: appended to '{title}' but could not read it back: {e}")
+            info = {}
+        return _playlist_result(info, title, pl_id, int(existing.get("leafCount") or 0) + 1)
 
 
 # Keep alias for backward compatibility
@@ -287,12 +345,9 @@ def reindex_library_tracks() -> int:
     """
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     url = f"{_plex_url()}/library/sections/{_music_section_id()}/all?type=10"
-    req = urllib.request.Request(url, headers=get_plex_headers())
     try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            data = json.loads(raw)
-            items = data.get("MediaContainer", {}).get("Metadata", [])
+        data = get_json(url, headers=get_plex_headers(), timeout=45, retries=1)
+        items = (data or {}).get("MediaContainer", {}).get("Metadata", []) or []
     except Exception as e:
         print(f"Error fetching library tracks from Plex for re-index: {e}")
         return 0
@@ -478,18 +533,16 @@ CHANNEL_DEFINITIONS = {
 def get_album_tracks(rating_key: str) -> List[dict]:
     """Fetch individual tracks for an album rating key."""
     url = f"{_plex_url()}/library/metadata/{rating_key}/children"
-    req = urllib.request.Request(url, headers=get_plex_headers())
     tracks = []
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            for t in data.get("MediaContainer", {}).get("Metadata", []):
-                tracks.append({
-                    "ratingKey": str(t.get("ratingKey")),
-                    "title": t.get("title"),
-                    "index": t.get("index"),
-                    "duration": t.get("duration", 0),
-                })
+        data = get_json(url, headers=get_plex_headers(), timeout=10)
+        for t in (data or {}).get("MediaContainer", {}).get("Metadata", []) or []:
+            tracks.append({
+                "ratingKey": str(t.get("ratingKey")),
+                "title": t.get("title"),
+                "index": t.get("index"),
+                "duration": t.get("duration", 0),
+            })
     except Exception as e:
         print(f"Error fetching tracks for album {rating_key}: {e}")
     return tracks

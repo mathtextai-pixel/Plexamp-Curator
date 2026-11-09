@@ -12,14 +12,15 @@ import os
 import random
 import re
 import sqlite3
-import urllib.parse
-import urllib.request
+import urllib.error
 from typing import Dict, List, Optional
 
 from config import CONFIG, get_float, get_int
+from http_client import request_json
 
 DB_PATH = os.path.join(CONFIG["DATA_DIR"], "recommendations.db")
-_ACTIVE_PROVIDER: str = (CONFIG.get("LLM_PROVIDER") or "gemini").strip().lower()
+_VALID_PROVIDERS = ("gemini", "ollama")
+_PROVIDER_SETTING_KEY = "llm_provider"
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -43,6 +44,17 @@ def init_budget_table():
         )
         """
     )
+    # Small key/value table for runtime settings that must be shared by all
+    # Gunicorn workers (an in-memory global only changes the worker that served the request).
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -50,16 +62,45 @@ def init_budget_table():
 init_budget_table()
 
 
+def _default_provider() -> str:
+    p = (CONFIG.get("LLM_PROVIDER") or "gemini").strip().lower()
+    return p if p in _VALID_PROVIDERS else "gemini"
+
+
 def get_active_provider() -> str:
-    return _ACTIVE_PROVIDER if _ACTIVE_PROVIDER in ("gemini", "ollama") else "gemini"
+    """Active provider as last set from the UI (persisted in SQLite), else LLM_PROVIDER."""
+    try:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (_PROVIDER_SETTING_KEY,)
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        print(f"Warning reading LLM provider setting: {e}")
+        row = None
+    if row and row[0] in _VALID_PROVIDERS:
+        return row[0]
+    return _default_provider()
 
 
 def set_active_provider(provider: str) -> str:
-    global _ACTIVE_PROVIDER
     p = (provider or "").strip().lower()
-    if p in ("gemini", "ollama"):
-        _ACTIVE_PROVIDER = p
-    return _ACTIVE_PROVIDER
+    if p in _VALID_PROVIDERS:
+        conn = _get_conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                """,
+                (_PROVIDER_SETTING_KEY, p),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return get_active_provider()
 
 
 def get_current_month_usage_usd() -> float:
@@ -153,16 +194,10 @@ def call_gemini_raw_json(prompt: str, purpose: str = "curation", timeout: int = 
         },
     }
 
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        # 429 / 5xx / connection errors are retried (those requests are not billed);
+        # read timeouts are not, since the request may still have been processed and billed.
+        data = request_json("POST", url, body=payload, timeout=timeout, retries=2, backoff=1.5) or {}
 
         usage = data.get("usageMetadata", {})
         prompt_tokens = int(usage.get("promptTokenCount", 0) or 0)
@@ -187,8 +222,11 @@ def call_gemini_raw_json(prompt: str, purpose: str = "curation", timeout: int = 
                         return parsed
             if parts and "text" in parts[-1]:
                 return _parse_json_lenient(parts[-1]["text"])
+    except urllib.error.HTTPError as e:
+        # Don't print the exception's URL: it carries the API key.
+        print(f"Error calling Gemini API ({purpose}): HTTP {e.code} {e.reason}")
     except Exception as e:
-        print(f"Error calling Gemini API ({purpose}): {e}")
+        print(f"Error calling Gemini API ({purpose}): {type(e).__name__}: {e}")
     return None
 
 
@@ -211,16 +249,10 @@ def call_ollama_json(prompt: str, purpose: str = "curation", timeout: Optional[i
         },
     }
 
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        # One retry for connection errors (e.g. Ollama restarting); a slow model
+        # load that hits the timeout is not retried, it falls back to Gemini instead.
+        data = request_json("POST", url, body=payload, timeout=timeout, retries=1) or {}
         response_text = data.get("response", "")
         parsed = _parse_json_lenient(response_text)
         if parsed is not None:

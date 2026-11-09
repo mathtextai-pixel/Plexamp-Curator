@@ -16,6 +16,7 @@ if SCRIPT_DIR not in sys.path:
 
 from config import CONFIG
 from discovery_engine import run_weekly_discovery_crawl
+from locks import REFRESH_JOB_LOCK, LockBusy, file_lock
 from music_excavator import (
     generate_channel_playlists,
     generate_large_vault_playlist,
@@ -25,7 +26,25 @@ from music_excavator import (
 LOG_FILE = os.path.join(CONFIG["DATA_DIR"], "weekly_refresh.log")
 
 
+# How long a scheduled refresh waits for a manual refresh that is already running.
+REFRESH_LOCK_WAIT_SECONDS = 30 * 60
+
+
 def run_refresh(include_discovery: bool = True):
+    """Run the full refresh while holding the shared refresh lock (waits for any manual run)."""
+    try:
+        with file_lock(REFRESH_JOB_LOCK, timeout=REFRESH_LOCK_WAIT_SECONDS):
+            _run_refresh_locked(include_discovery)
+    except LockBusy:
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg = f"[{now}] ❌ Skipped weekly refresh: another playlist refresh held the lock for {REFRESH_LOCK_WAIT_SECONDS // 60} min.\n\n"
+        print(msg, file=sys.stderr, end="")
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(msg)
+
+
+def _run_refresh_locked(include_discovery: bool):
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = f"[{now}] === STARTING AUTOMATED WEEKLY PLAYLIST & DISCOVERY REFRESH ===\n"

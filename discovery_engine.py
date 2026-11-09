@@ -4,16 +4,15 @@ Discovery Engine: Stepping-stone music discovery, Deezer enrichment,
 and Lidarr / Deemix sync.
 """
 
-import json
 import os
 import sqlite3
 import sys
 import urllib.error
 import urllib.parse
-import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from config import CONFIG, get_int
+from http_client import get_json, http_error_body, request_json
 
 DB_PATH = os.path.join(CONFIG["DATA_DIR"], "recommendations.db")
 _LIDARR_DEFAULTS_CACHE: Optional[Tuple[str, int, int]] = None
@@ -66,35 +65,31 @@ def fetch_deezer_metadata(artist: str, album: str) -> dict:
     """Fetch cover art, preview audio MP3, and Deezer ID from Deezer API."""
     q = urllib.parse.quote(f'artist:"{artist}" album:"{album}"')
     url = f"https://api.deezer.com/search/album?q={q}&limit=1"
-    req = urllib.request.Request(url, headers={"User-Agent": "MusicExcavator/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            if data.get("data"):
-                item = data["data"][0]
-                deezer_id = str(item.get("id"))
-                cover = item.get("cover_big") or item.get("cover_medium") or item.get("cover")
-                link = item.get("link")
+        data = get_json(url, timeout=6) or {}
+        if data.get("data"):
+            item = data["data"][0]
+            deezer_id = str(item.get("id"))
+            cover = item.get("cover_big") or item.get("cover_medium") or item.get("cover")
+            link = item.get("link")
 
-                preview_url = None
-                try:
-                    tracks_url = f"https://api.deezer.com/album/{deezer_id}/tracks?limit=1"
-                    req_t = urllib.request.Request(tracks_url, headers={"User-Agent": "MusicExcavator/1.0"})
-                    with urllib.request.urlopen(req_t, timeout=5) as resp_t:
-                        tdata = json.loads(resp_t.read().decode("utf-8", errors="replace"))
-                        if tdata.get("data"):
-                            preview_url = tdata["data"][0].get("preview")
-                except Exception:
-                    pass
+            preview_url = None
+            try:
+                tracks_url = f"https://api.deezer.com/album/{deezer_id}/tracks?limit=1"
+                tdata = get_json(tracks_url, timeout=5, retries=1) or {}
+                if tdata.get("data"):
+                    preview_url = tdata["data"][0].get("preview")
+            except Exception:
+                pass
 
-                deemix_url = f"{_deemix_public_url()}/#/album/{deezer_id}"
-                return {
-                    "cover_url": cover,
-                    "preview_url": preview_url,
-                    "deezer_id": deezer_id,
-                    "deezer_url": link,
-                    "deemix_url": deemix_url,
-                }
+            deemix_url = f"{_deemix_public_url()}/#/album/{deezer_id}"
+            return {
+                "cover_url": cover,
+                "preview_url": preview_url,
+                "deezer_id": deezer_id,
+                "deezer_url": link,
+                "deemix_url": deemix_url,
+            }
     except Exception as e:
         print(f"Deezer fetch error for {artist} - {album}: {e}", file=sys.stderr)
 
@@ -130,23 +125,17 @@ def _resolve_lidarr_defaults() -> Tuple[str, int, int]:
 
     try:
         if not root_folder:
-            req = urllib.request.Request(f"{_lidarr_url()}/api/v1/rootfolder", headers=get_lidarr_headers())
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                folders = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if folders and isinstance(folders, list):
-                    root_folder = folders[0].get("path") or "/data/media/Music"
+            folders = get_json(f"{_lidarr_url()}/api/v1/rootfolder", headers=get_lidarr_headers(), timeout=5)
+            if folders and isinstance(folders, list):
+                root_folder = folders[0].get("path") or "/data/media/Music"
         if not quality_id:
-            req = urllib.request.Request(f"{_lidarr_url()}/api/v1/qualityprofile", headers=get_lidarr_headers())
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                qps = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if qps and isinstance(qps, list):
-                    quality_id = int(qps[0].get("id", 1))
+            qps = get_json(f"{_lidarr_url()}/api/v1/qualityprofile", headers=get_lidarr_headers(), timeout=5)
+            if qps and isinstance(qps, list):
+                quality_id = int(qps[0].get("id", 1))
         if not metadata_id:
-            req = urllib.request.Request(f"{_lidarr_url()}/api/v1/metadataprofile", headers=get_lidarr_headers())
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                mps = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if mps and isinstance(mps, list):
-                    metadata_id = int(mps[0].get("id", 1))
+            mps = get_json(f"{_lidarr_url()}/api/v1/metadataprofile", headers=get_lidarr_headers(), timeout=5)
+            if mps and isinstance(mps, list):
+                metadata_id = int(mps[0].get("id", 1))
     except Exception as e:
         print(f"Lidarr profile auto-detect fallback ({e})", file=sys.stderr)
 
@@ -158,55 +147,58 @@ def _resolve_lidarr_defaults() -> Tuple[str, int, int]:
     return _LIDARR_DEFAULTS_CACHE
 
 
-def check_lidarr_status_for_album(artist: str, album: str) -> str:
-    """Check whether Lidarr has downloaded this album, has it wanted, or not added."""
+def check_lidarr_status_for_album(artist: str, album: str) -> Optional[str]:
+    """
+    Check whether Lidarr has downloaded this album, has it wanted, or not added.
+    Returns None if Lidarr could not be reached or answered with something unexpected,
+    so callers can keep the last known status instead of overwriting it.
+    """
     try:
         q = urllib.parse.quote(artist)
-        url = f"{_lidarr_url()}/api/v1/artist?name={q}"
-        req = urllib.request.Request(url, headers=get_lidarr_headers())
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            artists_data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        artists_data = get_json(f"{_lidarr_url()}/api/v1/artist?name={q}", headers=get_lidarr_headers(), timeout=5)
+        if not isinstance(artists_data, list):
+            raise ValueError(f"unexpected artist response type {type(artists_data).__name__}")
 
-        matched_artist = None
-        for a in artists_data:
-            if a.get("artistName", "").strip().lower() == artist.strip().lower():
-                matched_artist = a
-                break
-
+        wanted_artist = artist.strip().lower()
+        matched_artist = next(
+            (a for a in artists_data if (a.get("artistName") or "").strip().lower() == wanted_artist),
+            None,
+        )
         if not matched_artist:
             return "Not Added"
 
-        artist_id = matched_artist["id"]
-        albums_url = f"{_lidarr_url()}/api/v1/album?artistId={artist_id}"
-        req_alb = urllib.request.Request(albums_url, headers=get_lidarr_headers())
-        with urllib.request.urlopen(req_alb, timeout=5) as resp_alb:
-            albums_data = json.loads(resp_alb.read().decode("utf-8", errors="replace"))
+        albums_data = get_json(
+            f"{_lidarr_url()}/api/v1/album?artistId={matched_artist['id']}",
+            headers=get_lidarr_headers(),
+            timeout=5,
+        )
+        if not isinstance(albums_data, list):
+            raise ValueError(f"unexpected album response type {type(albums_data).__name__}")
 
+        wanted_album = album.strip().lower()
         for alb in albums_data:
-            title = alb.get("title", "").strip().lower()
-            if album.strip().lower() in title or title in album.strip().lower():
-                has_files = alb.get("hasFile") or (alb.get("statistics", {}).get("trackFileCount", 0) > 0)
+            title = (alb.get("title") or "").strip().lower()
+            if not title or not wanted_album:
+                continue  # an empty string is a substring of everything
+            if wanted_album in title or title in wanted_album:
+                has_files = alb.get("hasFile") or ((alb.get("statistics") or {}).get("trackFileCount", 0) > 0)
                 if has_files:
                     return "Downloaded"
-                elif alb.get("monitored"):
+                if alb.get("monitored"):
                     return "Wanted"
-                else:
-                    return "Not Monitored"
+                return "Not Monitored"
 
         return "Artist Added (Album Missing)"
     except Exception as e:
-        print(f"Lidarr check error: {e}", file=sys.stderr)
-        return "Not Added"
+        print(f"Lidarr check error for {artist} - {album}: {e}", file=sys.stderr)
+        return None
 
 
 def add_to_lidarr(artist_name: str, album_name: Optional[str] = None) -> dict:
     """Add an artist to Lidarr and trigger album search."""
     try:
         q = urllib.parse.quote(artist_name)
-        lookup_url = f"{_lidarr_url()}/api/v1/artist/lookup?term={q}"
-        req = urllib.request.Request(lookup_url, headers=get_lidarr_headers())
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            results = json.loads(resp.read().decode("utf-8", errors="replace"))
+        results = get_json(f"{_lidarr_url()}/api/v1/artist/lookup?term={q}", headers=get_lidarr_headers(), timeout=8)
 
         if not results:
             return {"success": False, "message": f"Artist '{artist_name}' not found on MusicBrainz/Lidarr"}
@@ -227,20 +219,19 @@ def add_to_lidarr(artist_name: str, album_name: Optional[str] = None) -> dict:
             },
         }
 
-        data_bytes = json.dumps(payload).encode("utf-8")
-        post_url = f"{_lidarr_url()}/api/v1/artist"
-        post_req = urllib.request.Request(
-            post_url,
-            data=data_bytes,
-            headers={**get_lidarr_headers(), "Content-Type": "application/json"},
-            method="POST",
+        # Not retried: a lost response would turn into an "already added" error on retry.
+        res_data = request_json(
+            "POST",
+            f"{_lidarr_url()}/api/v1/artist",
+            headers=get_lidarr_headers(),
+            body=payload,
+            timeout=10,
+            retries=0,
         )
-        with urllib.request.urlopen(post_req, timeout=10) as resp_post:
-            res_data = json.loads(resp_post.read().decode("utf-8", errors="replace"))
-            return {"success": True, "data": res_data, "message": f"Added {artist_name} to Lidarr!"}
+        return {"success": True, "data": res_data, "message": f"Added {artist_name} to Lidarr!"}
 
     except urllib.error.HTTPError as he:
-        err_msg = he.read().decode("utf-8", errors="replace") if he.fp else str(he)
+        err_msg = http_error_body(he)
         if "already been added" in err_msg.lower():
             return {"success": True, "message": f"Artist {artist_name} is already in Lidarr. Searching missing albums..."}
         return {"success": False, "message": f"Lidarr API error: {he.code} - {err_msg}"}
@@ -348,7 +339,8 @@ def _insert_recommendation_item(conn: sqlite3.Connection, item: dict) -> Optiona
 
     print(f"Discovering: {artist} - {album}...")
     meta = fetch_deezer_metadata(artist, album)
-    status = check_lidarr_status_for_album(artist, album)
+    # Unknown (Lidarr unreachable) is stored as "Not Added"; the next successful sync corrects it.
+    status = check_lidarr_status_for_album(artist, album) or "Not Added"
     bandcamp_url = f"https://bandcamp.com/search?q={urllib.parse.quote(artist + ' ' + album)}"
     channel = item.get("channel") or item.get("genre") or "General"
 

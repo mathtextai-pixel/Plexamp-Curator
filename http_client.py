@@ -21,6 +21,7 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_sleep = time.sleep  # backoff sleep; tests replace this to run instantly
 DEFAULT_USER_AGENT = "CrateExcavator/1.0"
 
 
@@ -81,7 +82,7 @@ def request_raw(
         attempt += 1
         if delay is None:
             delay = backoff * (2 ** (attempt - 1))
-        time.sleep(min(delay, max_backoff))
+        _sleep(min(delay, max_backoff))
 
 
 def request_json(method: str, url: str, **kwargs) -> Any:

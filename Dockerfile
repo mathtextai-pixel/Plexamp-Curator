@@ -15,6 +15,8 @@ COPY discovery_engine.py .
 COPY weekly_refresh.py .
 COPY http_client.py .
 COPY locks.py .
+COPY jobs.py .
+COPY cron.py .
 COPY templates/ ./templates/
 
 RUN mkdir -p /app/data

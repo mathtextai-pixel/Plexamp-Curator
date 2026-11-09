@@ -10,7 +10,7 @@ import sqlite3
 import time
 import urllib.parse
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from config import CONFIG, get_int
 from http_client import get_json, request_json, request_raw
@@ -113,18 +113,39 @@ def analyze_recent_habits(limit: int = 500) -> dict:
     }
 
 
-def get_unplayed_vault_albums(limit: int = 1000) -> List[dict]:
-    """Fetch unplayed or zero-play albums from Plex Music library."""
-    url = (
-        f"{_plex_url()}/library/sections/{_music_section_id()}/all?"
-        f"type=9&unwatched=1&X-Plex-Container-Start=0&X-Plex-Container-Size={limit}"
-    )
-    try:
-        data = get_json(url, headers=get_plex_headers(), timeout=15)
-        items = (data or {}).get("MediaContainer", {}).get("Metadata", []) or []
-    except Exception as e:
-        print(f"Error fetching unplayed vault albums: {e}")
-        return []
+VAULT_PAGE_SIZE = 500
+VAULT_MAX_ALBUMS = 20000  # safety stop for pathological libraries
+
+
+def get_unplayed_vault_albums(limit: Optional[int] = None) -> List[dict]:
+    """
+    Fetch unplayed albums from the Plex music library, paging through the whole
+    section (Plex sorts by title, so a single capped request only ever saw the
+    first part of the alphabet). `limit` caps the total; None means all.
+    """
+    cap = min(limit, VAULT_MAX_ALBUMS) if limit else VAULT_MAX_ALBUMS
+    items: List[dict] = []
+    start = 0
+    while start < cap:
+        size = min(VAULT_PAGE_SIZE, cap - start)
+        url = (
+            f"{_plex_url()}/library/sections/{_music_section_id()}/all?"
+            f"type=9&unwatched=1&X-Plex-Container-Start={start}&X-Plex-Container-Size={size}"
+        )
+        try:
+            data = get_json(url, headers=get_plex_headers(), timeout=20)
+        except Exception as e:
+            print(f"Error fetching unplayed vault albums (offset {start}): {e}")
+            if not items:
+                return []
+            break  # keep what we have rather than failing the whole refresh
+        container = (data or {}).get("MediaContainer", {})
+        page = container.get("Metadata", []) or []
+        items.extend(page)
+        total = container.get("totalSize")
+        start += len(page)
+        if len(page) < size or (isinstance(total, int) and start >= total):
+            break
 
     results = []
     for it in items:
@@ -280,7 +301,8 @@ def create_or_replace_plex_playlist(title: str, rating_keys: List[str]) -> Optio
     only created when Plex confirms none with this title exists.
     Writes to the same playlist are serialised across workers and threads.
     """
-    clean_keys = [str(k) for k in rating_keys if k]
+    # Plex rating keys are numeric; anything else is dropped so it can't alter the item URI.
+    clean_keys = [str(k).strip() for k in rating_keys if str(k).strip().isdigit()]
     if not clean_keys:
         return None
 
@@ -303,6 +325,9 @@ def create_or_replace_plex_playlist(title: str, rating_keys: List[str]) -> Optio
 
 def append_to_plex_playlist(title: str, rating_key: str) -> Optional[dict]:
     """Append a single album or track to an existing playlist, or create it if not found."""
+    if not str(rating_key).strip().isdigit():
+        return None
+    rating_key = str(rating_key).strip()
     machine_id = get_plex_machine_id()
     if not machine_id:
         return None
@@ -552,6 +577,7 @@ def generate_channel_playlists(
     channel_key: Optional[str] = None,
     rotate: bool = False,
     use_gemini_flow: bool = True,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> List[dict]:
     """
     Generate curated, flowing playlists for all channels or a single specified channel.
@@ -560,7 +586,9 @@ def generate_channel_playlists(
     """
     import gemini_curator
 
-    vault = get_unplayed_vault_albums(limit=1000)
+    report = progress or (lambda _msg: None)
+    report("Scanning your unplayed vault in Plex…")
+    vault = get_unplayed_vault_albums()
     recent_keys, recent_pairs = get_recently_played_tracks()
 
     selected_channels = (
@@ -570,8 +598,9 @@ def generate_channel_playlists(
     )
 
     results = []
-    for key, cdef in selected_channels.items():
+    for idx, (key, cdef) in enumerate(selected_channels.items(), 1):
         title = cdef["title"]
+        report(f"Curating {cdef['icon']} {cdef['name']} ({idx}/{len(selected_channels)})…")
         matched_albums = []
 
         # 1. Match specific target masterpieces
@@ -662,7 +691,7 @@ def generate_channel_playlists(
 
 def generate_large_vault_playlist(rotate: bool = False) -> Optional[dict]:
     """Generate a large curated master playlist (200+ tracks) from unplayed albums across the library."""
-    vault = get_unplayed_vault_albums(limit=1000)
+    vault = get_unplayed_vault_albums()
     if not vault:
         return None
 

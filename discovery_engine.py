@@ -5,11 +5,12 @@ and Lidarr / Deemix sync.
 """
 
 import os
+import re
 import sqlite3
 import sys
 import urllib.error
 import urllib.parse
-from typing import List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from config import CONFIG, get_int
 from http_client import get_json, http_error_body, request_json
@@ -194,21 +195,87 @@ def check_lidarr_status_for_album(artist: str, album: str) -> Optional[str]:
         return None
 
 
+def _normalize_artist_name(name: str) -> str:
+    """Loose-but-exact comparison key: case, punctuation, '&'/'and' and a leading 'The' are ignored."""
+    n = (name or "").casefold().replace("&", " and ")
+    n = re.sub(r"[.'’]", "", n)  # R.E.M. -> rem, Guns N' Roses -> guns n roses
+    n = re.sub(r"[^\w\s]", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    if n.startswith("the "):
+        n = n[4:]
+    return n
+
+
+def _pick_exact_artist(results: Any, artist_name: str) -> Optional[dict]:
+    """Return the lookup result whose name matches `artist_name`, or None. Never guesses."""
+    if not isinstance(results, list):
+        return None
+    wanted = _normalize_artist_name(artist_name)
+    for r in results:
+        if isinstance(r, dict) and r.get("foreignArtistId") and _normalize_artist_name(r.get("artistName") or "") == wanted:
+            return r
+    return None
+
+
+def _trigger_lidarr_artist_search(foreign_artist_id: Optional[str], artist_name: str) -> dict:
+    """For an artist already in Lidarr, start a search for their missing albums."""
+    try:
+        library = get_json(f"{_lidarr_url()}/api/v1/artist", headers=get_lidarr_headers(), timeout=10)
+        wanted = _normalize_artist_name(artist_name)
+        existing = None
+        for a in library if isinstance(library, list) else []:
+            if foreign_artist_id and a.get("foreignArtistId") == foreign_artist_id:
+                existing = a
+                break
+            if existing is None and _normalize_artist_name(a.get("artistName") or "") == wanted:
+                existing = a
+        if not existing:
+            return {"success": True, "message": f"{artist_name} is already in Lidarr (could not locate it to start a search)."}
+
+        request_json(
+            "POST",
+            f"{_lidarr_url()}/api/v1/command",
+            headers=get_lidarr_headers(),
+            body={"name": "ArtistSearch", "artistId": existing["id"]},
+            timeout=10,
+            retries=0,
+        )
+        return {"success": True, "message": f"{artist_name} is already in Lidarr. Searching for missing albums..."}
+    except Exception as e:
+        return {"success": True, "message": f"{artist_name} is already in Lidarr, but starting a search failed: {e}"}
+
+
 def add_to_lidarr(artist_name: str, album_name: Optional[str] = None) -> dict:
-    """Add an artist to Lidarr and trigger album search."""
+    """
+    Add an artist to Lidarr (monitoring their whole catalogue) and search for missing albums.
+    Only adds when the MusicBrainz lookup returns an exact name match, so an ambiguous
+    name never pulls in a different artist's discography.
+    """
+    foreign_id: Optional[str] = None
     try:
         q = urllib.parse.quote(artist_name)
         results = get_json(f"{_lidarr_url()}/api/v1/artist/lookup?term={q}", headers=get_lidarr_headers(), timeout=8)
-
         if not results:
             return {"success": False, "message": f"Artist '{artist_name}' not found on MusicBrainz/Lidarr"}
 
-        artist_meta = results[0]
-        root_folder, quality_id, metadata_id = _resolve_lidarr_defaults()
+        artist_meta = _pick_exact_artist(results, artist_name)
+        if not artist_meta:
+            closest = [r.get("artistName") for r in results[:3] if isinstance(r, dict) and r.get("artistName")]
+            hint = f" Closest matches: {', '.join(closest)}." if closest else ""
+            return {
+                "success": False,
+                "message": f"No exact Lidarr match for '{artist_name}', so nothing was added.{hint} Add it manually in Lidarr if one of these is right.",
+            }
 
+        foreign_id = artist_meta.get("foreignArtistId")
+        if artist_meta.get("id"):
+            # Lookup results that already have a Lidarr id are in the library.
+            return _trigger_lidarr_artist_search(foreign_id, artist_name)
+
+        root_folder, quality_id, metadata_id = _resolve_lidarr_defaults()
         payload = {
             "artistName": artist_meta.get("artistName"),
-            "foreignArtistId": artist_meta.get("foreignArtistId"),
+            "foreignArtistId": foreign_id,
             "qualityProfileId": quality_id,
             "metadataProfileId": metadata_id,
             "rootFolderPath": root_folder,
@@ -228,15 +295,15 @@ def add_to_lidarr(artist_name: str, album_name: Optional[str] = None) -> dict:
             timeout=10,
             retries=0,
         )
-        return {"success": True, "data": res_data, "message": f"Added {artist_name} to Lidarr!"}
+        return {"success": True, "data": res_data, "message": f"Added {artist_meta.get('artistName')} to Lidarr!"}
 
     except urllib.error.HTTPError as he:
         err_msg = http_error_body(he)
-        if "already been added" in err_msg.lower():
-            return {"success": True, "message": f"Artist {artist_name} is already in Lidarr. Searching missing albums..."}
-        return {"success": False, "message": f"Lidarr API error: {he.code} - {err_msg}"}
+        if "already been added" in err_msg.lower() or "already exists" in err_msg.lower():
+            return _trigger_lidarr_artist_search(foreign_id, artist_name)
+        return {"success": False, "message": f"Lidarr API error: {he.code} - {err_msg[:300]}"}
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        return {"success": False, "message": f"Could not reach Lidarr: {e}"}
 
 
 SEED_STEPPING_STONES = [
@@ -323,9 +390,13 @@ SEED_STEPPING_STONES = [
 ]
 
 
-def _insert_recommendation_item(conn: sqlite3.Connection, item: dict) -> Optional[dict]:
-    artist = (item.get("artist") or "").strip()
-    album = (item.get("album") or "").strip()
+def _insert_recommendation_item(conn: sqlite3.Connection, item: Any) -> Optional[dict]:
+    if not isinstance(item, dict):
+        return None
+    artist = item.get("artist")
+    album = item.get("album")
+    artist = artist.strip() if isinstance(artist, str) else ""
+    album = album.strip() if isinstance(album, str) else ""
     if not artist or not album:
         return None
 
@@ -379,7 +450,10 @@ def populate_and_sync_db():
     print("Database sync complete!")
 
 
-def run_weekly_discovery_crawl(count: Optional[int] = None) -> List[dict]:
+def run_weekly_discovery_crawl(
+    count: Optional[int] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> List[dict]:
     """
     Use recent Tautulli listening habits + Gemini (or Ollama fallback) to discover
     brand-new stepping-stone albums not already in the library or recommendations DB.
@@ -387,8 +461,11 @@ def run_weekly_discovery_crawl(count: Optional[int] = None) -> List[dict]:
     import gemini_curator
     from music_excavator import analyze_recent_habits
 
+    report = progress or (lambda _msg: None)
     if count is None:
         count = get_int("DISCOVERY_PICKS_PER_WEEK")
+    count = max(1, min(int(count), 20))
+    report("Reading your recent listening from Tautulli…")
 
     habits = analyze_recent_habits(limit=500)
     top_artists = [a for a, _ in habits.get("top_artists", [])]
@@ -413,6 +490,7 @@ def run_weekly_discovery_crawl(count: Optional[int] = None) -> List[dict]:
     for r in cur.fetchall():
         existing_artists_set.add(r[0])
 
+    report("Asking the AI DJ for new stepping-stone albums…")
     picks = gemini_curator.discover_new_artists_with_gemini(
         top_artists=top_artists,
         existing_library_artists=sorted(existing_artists_set),
@@ -420,7 +498,8 @@ def run_weekly_discovery_crawl(count: Optional[int] = None) -> List[dict]:
     )
 
     added: List[dict] = []
-    for item in picks or []:
+    for i, item in enumerate(picks or [], 1):
+        report(f"Looking up album {i}/{len(picks)} on Deezer & Lidarr…")
         res = _insert_recommendation_item(conn, item)
         if res:
             added.append(res)

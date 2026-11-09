@@ -13,7 +13,7 @@ import hashlib
 import os
 import re
 import time
-from typing import Iterator, Optional
+from typing import IO, Iterator, Optional
 
 from config import CONFIG
 
@@ -30,31 +30,54 @@ def _lock_path(name: str) -> str:
     return os.path.join(lock_dir, f"{slug}-{digest}.lock")
 
 
-@contextlib.contextmanager
-def file_lock(name: str, timeout: Optional[float] = None, poll: float = 0.25) -> Iterator[None]:
+class LockHandle:
+    """An acquired lock. May be released from a different thread than the one that took it."""
+
+    def __init__(self, name: str, fd: IO[str]):
+        self.name = name
+        self._fd: Optional[IO[str]] = fd
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            fd.close()
+
+
+def acquire(name: str, timeout: Optional[float] = None, poll: float = 0.25) -> LockHandle:
     """
-    Hold an exclusive lock named `name` for the duration of the block.
+    Take an exclusive lock named `name`.
       timeout=None -> wait indefinitely
       timeout=0    -> fail immediately with LockBusy if held elsewhere
       timeout=N    -> wait up to N seconds, then raise LockBusy
     """
     fd = open(_lock_path(name), "a")
-    try:
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise LockBusy(name)
-                time.sleep(poll)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
         try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return LockHandle(name, fd)
+        except BlockingIOError:
+            if deadline is not None and time.monotonic() >= deadline:
+                fd.close()
+                raise LockBusy(name)
+            time.sleep(poll)
+        except BaseException:
+            fd.close()
+            raise
+
+
+@contextlib.contextmanager
+def file_lock(name: str, timeout: Optional[float] = None, poll: float = 0.25) -> Iterator[None]:
+    """Hold the lock named `name` for the duration of the block (see `acquire` for timeout)."""
+    handle = acquire(name, timeout=timeout, poll=poll)
+    try:
+        yield
     finally:
-        fd.close()
+        handle.release()
 
 
 # Job-level lock shared by the manual "refresh all" endpoints and the weekly scheduler.

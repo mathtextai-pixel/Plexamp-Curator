@@ -472,14 +472,62 @@
     <div class="toast" id="toast"></div>
 
     <script>
+        // All POSTs go through apiPost(): it adds the X-Requested-With header the server
+        // requires, turns non-JSON error pages into {success:false, message}, and when the
+        // server starts a background job (HTTP 202 + job_id) it polls /api/jobs/<id>,
+        // showing progress, until the job finishes. Resolves to the job's final JSON.
+        const API_HEADERS = {'Content-Type': 'application/json', 'X-Requested-With': 'CrateExcavator'};
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+        async function readJson(res) {
+            try {
+                return await res.json();
+            } catch (e) {
+                return {success: false, message: `Server error (HTTP ${res.status})`};
+            }
+        }
+
+        async function apiPost(url, body, onProgress) {
+            const res = await fetch(url, {method: 'POST', headers: API_HEADERS, body: JSON.stringify(body || {})});
+            const data = await readJson(res);
+            if (res.status !== 202 || !data.job_id) return data;
+            return pollJob(data.job_id, onProgress || (msg => showToast('⏳ ' + msg)));
+        }
+
+        async function pollJob(jobId, onProgress) {
+            let lastProgress = '';
+            let failures = 0;
+            while (true) {
+                await sleep(1500);
+                let job;
+                try {
+                    job = await readJson(await fetch(`/api/jobs/${encodeURIComponent(jobId)}`));
+                    failures = 0;
+                } catch (e) {
+                    if (++failures >= 5) return {success: false, message: 'Lost connection while waiting for the server'};
+                    continue;
+                }
+                if (job.status === 'running') {
+                    if (job.progress && job.progress !== lastProgress) {
+                        lastProgress = job.progress;
+                        onProgress(job.progress);
+                    }
+                    continue;
+                }
+                return job.result || {success: false, message: job.message || 'Job failed'};
+            }
+        }
+
         const PLEX_MACHINE_ID = {{ plex_machine_id | tojson }};
         let currentVibeResult = null;
 
+        let toastTimer = null;
         function showToast(msg) {
             const toast = document.getElementById('toast');
             toast.textContent = msg;
             toast.style.display = 'block';
-            setTimeout(() => { toast.style.display = 'none'; }, 3500);
+            clearTimeout(toastTimer);  // a newer toast must not be hidden by an older timer
+            toastTimer = setTimeout(() => { toast.style.display = 'none'; }, 3500);
         }
 
         function updateMobileLlmUI(status) {
@@ -497,12 +545,7 @@
 
         async function switchLlmProvider(provider) {
             try {
-                const res = await fetch('/api/llm-provider', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({provider})
-                });
-                const data = await res.json();
+                const data = await apiPost('/api/llm-provider', {provider});
                 if (data.success) {
                     updateMobileLlmUI(data.status);
                     showToast(provider === 'ollama' ? '🦙 Using Local Ollama ($0)' : '⚡ Using Gemini Flash');
@@ -533,12 +576,7 @@
             showToast('AI DJ is sequencing your library tracks...');
 
             try {
-                const res = await fetch('/api/playlists/generate-from-prompt', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({prompt: prompt, count: 20})
-                });
-                const data = await res.json();
+                const data = await apiPost('/api/playlists/generate-from-prompt', {prompt: prompt, count: 20});
                 if (data.success) {
                     currentVibeResult = data;
                     if (data.llm_status) updateMobileLlmUI(data.llm_status);
@@ -592,13 +630,12 @@
         async function triggerSurpriseMe() {
             showToast('🎲 Spinning the vault for a surprise curveball...');
             try {
-                const res = await fetch('/api/mobile/surprise-me', {method: 'POST'});
-                const data = await res.json();
+                const data = await apiPost('/api/mobile/surprise-me');
                 if (data.success && data.prompt) {
                     document.getElementById('mobile-prompt-input').value = data.prompt;
                     generateVibePlaylist(data.prompt);
                 } else {
-                    showToast('❌ Error spinning surprise');
+                    showToast('❌ ' + (data.message || 'Error spinning surprise'));
                 }
             } catch (err) {
                 showToast('❌ Network error');
@@ -608,8 +645,7 @@
         async function triggerRefreshAllChannels() {
             showToast('🚀 Refreshing all 5 channels (~30s)...');
             try {
-                const res = await fetch('/api/playlists/generate-all', {method: 'POST'});
-                const data = await res.json();
+                const data = await apiPost('/api/playlists/generate-all');
                 if (data.success) {
                     if (data.llm_status) updateMobileLlmUI(data.llm_status);
                     showToast(`✓ All ${data.playlists.length} channel mixtapes updated in Plexamp!`);
@@ -631,15 +667,10 @@
             saveBtn.textContent = 'Saving...';
 
             try {
-                const res = await fetch('/api/playlists/save-permanent', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
+                const data = await apiPost('/api/playlists/save-permanent', {
                         title: currentVibeResult.creative_title,
                         rating_keys: currentVibeResult.rating_keys
-                    })
-                });
-                const data = await res.json();
+                    });
                 if (data.success) {
                     showToast('✓ ' + data.message);
                     saveBtn.textContent = '✓ Saved in Plexamp';

@@ -13,7 +13,7 @@ import random
 import re
 import sqlite3
 import urllib.error
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from config import CONFIG, get_float, get_int
 from http_client import request_json
@@ -165,6 +165,35 @@ def _parse_json_lenient(text: str) -> Optional[object]:
             except Exception:
                 pass
     return None
+
+
+def _clean_str(value: Any, max_len: int = 300) -> str:
+    """Return a stripped string from LLM output, or "" for anything that isn't a string."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:max_len]
+
+
+def _clean_str_list(value: Any, max_items: int = 50, max_len: int = 200) -> List[str]:
+    """Keep only non-empty, de-duplicated (case-insensitive) strings from an LLM-returned list."""
+    if not isinstance(value, list):
+        return []
+    out: List[str] = []
+    seen = set()
+    for item in value:
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            item = str(item)
+        s = _clean_str(item, max_len)
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            out.append(s)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _escape_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def call_gemini_raw_json(prompt: str, purpose: str = "curation", timeout: int = 20) -> Optional[object]:
@@ -338,17 +367,20 @@ Candidates:
 """
 
     res = call_llm_json(prompt, purpose=f"playlist_flow_{channel_name}")
-    if isinstance(res, dict) and res.get("sequenced_keys"):
+    if isinstance(res, dict):
         key_map = {str(t["ratingKey"]): t for t in candidate_tracks}
         sequenced = []
-        for k in res["sequenced_keys"]:
-            if str(k) in key_map and key_map[str(k)] not in sequenced:
-                sequenced.append(key_map[str(k)])
+        used = set()
+        for k in _clean_str_list(res.get("sequenced_keys"), max_items=200):
+            if k in key_map and k not in used:
+                used.add(k)
+                sequenced.append(key_map[k])
         if sequenced:
             print(f"  ✓ Sequenced {len(sequenced)} tracks for '{channel_name}'")
-            if res.get("liner_notes"):
-                print(f"    Liner notes: \"{res['liner_notes']}\"")
-            return sequenced
+            liner = _clean_str(res.get("liner_notes"))
+            if liner:
+                print(f"    Liner notes: \"{liner}\"")
+            return sequenced[:max(target_count, 1)]
 
     # Fallback if LLM unavailable: balanced round-robin across artists
     print("  Falling back to heuristic track selection.")
@@ -405,22 +437,62 @@ Return a JSON object with a "recommendations" array:
 Valid values for "channel": "Alt & Prime Country", "Pop & Acoustic Punk", "Indie Pop & Shimmer", "Indie Soul & Grooves", "The Canon Classics".
 """
     res = call_llm_json(prompt, purpose="discover_new_artists")
-    if isinstance(res, list):
-        return res
-    if isinstance(res, dict) and isinstance(res.get("recommendations"), list):
-        return res["recommendations"]
-    return []
+    if isinstance(res, dict):
+        res = res.get("recommendations")
+    return _clean_recommendations(res, count)
+
+
+def _clean_recommendations(raw: Any, count: int) -> List[dict]:
+    """Keep only well-formed {artist, album, ...} picks from LLM output, normalising field types."""
+    from music_excavator import CHANNEL_DEFINITIONS
+
+    if not isinstance(raw, list):
+        return []
+    valid_channels = {c["name"] for c in CHANNEL_DEFINITIONS.values()}
+    cleaned: List[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        artist = _clean_str(item.get("artist"), 200)
+        album = _clean_str(item.get("album"), 200)
+        if not artist or not album:
+            continue
+        year_raw = item.get("year")
+        year = None
+        if isinstance(year_raw, (int, float)) and not isinstance(year_raw, bool):
+            year = int(year_raw)
+        elif isinstance(year_raw, str) and year_raw.strip()[:4].isdigit():
+            year = int(year_raw.strip()[:4])
+        if year is not None and not 1900 <= year <= 2100:
+            year = None
+        channel = _clean_str(item.get("channel"), 100)
+        cleaned.append({
+            "artist": artist,
+            "album": album,
+            "year": year,
+            "genre": _clean_str(item.get("genre"), 100) or None,
+            "channel": channel if channel in valid_channels else "General",
+            "reason": _clean_str(item.get("reason"), 600) or None,
+        })
+        if len(cleaned) >= count:
+            break
+    return cleaned
 
 
 def generate_playlist_from_user_prompt(
     user_prompt: str,
     target_count: int = 20,
     provider_override: Optional[str] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """
     Generate an on-demand, custom-curated Plex playlist from a freeform user prompt,
     mood, feeling, or reference songs using the configured LLM and the user's library.
     """
+    report = progress or (lambda _msg: None)
+    if provider_override not in _VALID_PROVIDERS:
+        provider_override = None
+    target_count = max(1, min(int(target_count), 100))
     from music_excavator import (
         create_or_replace_plex_playlist,
         get_recently_played_tracks,
@@ -444,13 +516,18 @@ def generate_playlist_from_user_prompt(
         conn = _get_conn()
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT artist FROM library_tracks WHERE artist != ''")
-        library_artists = [r[0] for r in cur.fetchall()]
+        try:
+            cur.execute("SELECT DISTINCT artist FROM library_tracks WHERE artist != ''")
+            library_artists = [r[0] for r in cur.fetchall()]
+        except sqlite3.OperationalError:
+            # Table still missing: the re-index could not reach Plex.
+            library_artists = []
         if not library_artists:
             conn.close()
             return None
 
-    provider = (provider_override or get_active_provider()).lower()
+    provider = provider_override or get_active_provider()
+    report(f"Picking artists from your library with {provider.title()}…")
 
     # For local 8B Ollama, trim artist list to keep prompt compact & fast (~250 artists,
     # always keeping any artist whose name shares words with the user's prompt).
@@ -488,14 +565,16 @@ Return JSON:
 }}
 """
     res1 = call_llm_json(prompt1, purpose="prompt_match_artists", provider_override=provider)
-    if not isinstance(res1, dict) or not res1.get("matched_artists"):
+    matched_artists = _clean_str_list(res1.get("matched_artists") if isinstance(res1, dict) else None, max_items=30)
+    if not matched_artists:
         conn.close()
         return None
 
-    title = res1.get("title") or "🎯 Crate: Mood Selection"
+    title = _clean_str(res1.get("title"), 120) or "🎯 Crate: Mood Selection"
     if not any(char in title for char in ["🎯", "✨", "🌙", "⚡", "🌾", "☕", "🔥"]):
         title = f"✨ Crate: {title}"
-    vibe = res1.get("vibe") or user_prompt
+    vibe = _clean_str(res1.get("vibe"), 400) or user_prompt
+    report(f"Gathering tracks from {len(matched_artists)} artists…")
 
     recent_keys, recent_pairs = get_recently_played_tracks()
 
@@ -503,7 +582,7 @@ Return JSON:
     candidates = []
     seen_candidate_keys = set()
 
-    for art in res1["matched_artists"]:
+    for art in matched_artists:
         cur.execute(
             """
             SELECT rating_key, artist, title, album
@@ -521,11 +600,11 @@ Return JSON:
                 """
                 SELECT rating_key, artist, title, album
                 FROM library_tracks
-                WHERE lower(artist) LIKE ?
+                WHERE lower(artist) LIKE ? ESCAPE '\\'
                 ORDER BY RANDOM()
                 LIMIT 10
                 """,
-                (f"%{art.lower()}%",),
+                (f"%{_escape_like(art.lower())}%",),
             )
             rows = cur.fetchall()
 
@@ -572,13 +651,15 @@ Return JSON:
   "sequenced_keys": ["key1", "key2"]
 }}
 """
+    report(f"Sequencing {len(candidates)} candidate tracks…")
     res2 = call_llm_json(prompt2, purpose="prompt_sequence_flow", provider_override=provider)
     key_dict = {c["key"]: c for c in candidates}
-    sequenced_keys = []
-    if isinstance(res2, dict) and res2.get("sequenced_keys"):
-        for k in res2["sequenced_keys"]:
-            if str(k) in key_dict and str(k) not in sequenced_keys:
-                sequenced_keys.append(str(k))
+    sequenced_keys: List[str] = []
+    raw_keys = res2.get("sequenced_keys") if isinstance(res2, dict) else None
+    for k in _clean_str_list(raw_keys, max_items=200):
+        if k in key_dict and k not in sequenced_keys:
+            sequenced_keys.append(k)
+    sequenced_keys = sequenced_keys[:target_count]
 
     # Fallback: balanced round-robin if LLM returned too few keys
     if len(sequenced_keys) < min(8, len(candidates)):
@@ -590,6 +671,7 @@ Return JSON:
 
     # Step 4: Update dedicated playlist in Plex IN-PLACE (preserves ratingKey)
     dedicated_playlist_name = "✨ Crate: The Daily Vibe"
+    report("Updating “✨ Crate: The Daily Vibe” in Plex…")
     pl = create_or_replace_plex_playlist(dedicated_playlist_name, sequenced_keys)
     if pl:
         return {
@@ -600,6 +682,6 @@ Return JSON:
             "tracks": [key_dict[k] for k in sequenced_keys if k in key_dict],
             "rating_keys": sequenced_keys,
             "rating_key": pl["ratingKey"],
-            "provider": get_active_provider() if not provider_override else provider_override,
+            "provider": provider,
         }
     return None

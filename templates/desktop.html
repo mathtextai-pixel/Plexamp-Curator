@@ -900,6 +900,52 @@
     <div class="toast" id="toast"></div>
 
     <script>
+        // All POSTs go through apiPost(): it adds the X-Requested-With header the server
+        // requires, turns non-JSON error pages into {success:false, message}, and when the
+        // server starts a background job (HTTP 202 + job_id) it polls /api/jobs/<id>,
+        // showing progress, until the job finishes. Resolves to the job's final JSON.
+        const API_HEADERS = {'Content-Type': 'application/json', 'X-Requested-With': 'CrateExcavator'};
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+        async function readJson(res) {
+            try {
+                return await res.json();
+            } catch (e) {
+                return {success: false, message: `Server error (HTTP ${res.status})`};
+            }
+        }
+
+        async function apiPost(url, body, onProgress) {
+            const res = await fetch(url, {method: 'POST', headers: API_HEADERS, body: JSON.stringify(body || {})});
+            const data = await readJson(res);
+            if (res.status !== 202 || !data.job_id) return data;
+            return pollJob(data.job_id, onProgress || (msg => showToast('⏳ ' + msg)));
+        }
+
+        async function pollJob(jobId, onProgress) {
+            let lastProgress = '';
+            let failures = 0;
+            while (true) {
+                await sleep(1500);
+                let job;
+                try {
+                    job = await readJson(await fetch(`/api/jobs/${encodeURIComponent(jobId)}`));
+                    failures = 0;
+                } catch (e) {
+                    if (++failures >= 5) return {success: false, message: 'Lost connection while waiting for the server'};
+                    continue;
+                }
+                if (job.status === 'running') {
+                    if (job.progress && job.progress !== lastProgress) {
+                        lastProgress = job.progress;
+                        onProgress(job.progress);
+                    }
+                    continue;
+                }
+                return job.result || {success: false, message: job.message || 'Job failed'};
+            }
+        }
+
         const SERVER_CHANNELS = {{ channel_defs | tojson }};
         let lastGeneratedResult = null;
         let currentChannel = 'all';
@@ -929,12 +975,7 @@
 
         async function switchLlmProvider(provider) {
             try {
-                const res = await fetch('/api/llm-provider', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({provider})
-                });
-                const data = await res.json();
+                const data = await apiPost('/api/llm-provider', {provider});
                 if (data.success) {
                     updateLlmStatusUI(data.status);
                     showToast(provider === 'ollama'
@@ -967,12 +1008,7 @@
             showToast('AI DJ is searching your library tracks & updating "✨ Crate: The Daily Vibe" in-place...');
 
             try {
-                const res = await fetch('/api/playlists/generate-from-prompt', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({prompt: prompt, count: 20})
-                });
-                const data = await res.json();
+                const data = await apiPost('/api/playlists/generate-from-prompt', {prompt: prompt, count: 20});
                 if (data.success) {
                     lastGeneratedResult = data;
                     if (data.llm_status) updateLlmStatusUI(data.llm_status);
@@ -1023,15 +1059,10 @@
             showToast('Saving permanent playlist to Plexamp: ' + lastGeneratedResult.creative_title);
 
             try {
-                const res = await fetch('/api/playlists/save-permanent', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
+                const data = await apiPost('/api/playlists/save-permanent', {
                         title: lastGeneratedResult.creative_title,
                         rating_keys: lastGeneratedResult.rating_keys
-                    })
-                });
-                const data = await res.json();
+                    });
                 if (data.success) {
                     showToast('✓ ' + data.message);
                     saveBtn.textContent = '✓ Saved in Plexamp';
@@ -1047,11 +1078,13 @@
             }
         }
 
+        let toastTimer = null;
         function showToast(msg) {
             const toast = document.getElementById('toast');
             toast.textContent = msg;
             toast.style.display = 'block';
-            setTimeout(() => { toast.style.display = 'none'; }, 4000);
+            clearTimeout(toastTimer);  // a newer toast must not be hidden by an older timer
+            toastTimer = setTimeout(() => { toast.style.display = 'none'; }, 4000);
         }
 
         function selectChannel(channelKey, btn) {
@@ -1181,8 +1214,7 @@
             if (btn) { btn.disabled = true; btn.textContent = '⏳ Curating 5 Channels...'; }
             showToast('🚀 AI DJ is curating and sequencing all 5 channels in Plexamp (approx 30s)...');
             try {
-                const res = await fetch('/api/playlists/generate-all', {method: 'POST'});
-                const data = await res.json();
+                const data = await apiPost('/api/playlists/generate-all');
                 if (data.success) {
                     if (data.llm_status) updateLlmStatusUI(data.llm_status);
                     showToast(`✓ Updated ${data.playlists.length} channel playlists in-place in Plexamp!`);
@@ -1199,8 +1231,7 @@
         async function deployLargeVaultPlaylist() {
             showToast('🏛️ Updating Large Vault Playlist (250+ tracks) in Plexamp...');
             try {
-                const res = await fetch('/api/vault/large-playlist', {method: 'POST'});
-                const data = await res.json();
+                const data = await apiPost('/api/vault/large-playlist');
                 if (data.success) {
                     showToast(`✓ "${data.playlist}" updated with ${data.track_count} tracks (${data.album_count} albums)!`);
                 } else {
@@ -1227,8 +1258,7 @@
             const ch = currentChannel;
             showToast(`Updating ${channelMap[ch]} playlist in Plexamp...`);
             try {
-                const res = await fetch(`/api/playlists/generate/${ch}`, {method: 'POST'});
-                const data = await res.json();
+                const data = await apiPost(`/api/playlists/generate/${ch}`);
                 if (data.success) {
                     if (data.llm_status) updateLlmStatusUI(data.llm_status);
                     showToast(`✓ "${data.playlist}" updated with ${data.track_count} tracks!`);
@@ -1250,12 +1280,7 @@
             btn.textContent = 'Adding...';
             btn.disabled = true;
             try {
-                const res = await fetch('/api/add-to-lidarr', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({artist, album})
-                });
-                const data = await res.json();
+                const data = await apiPost('/api/add-to-lidarr', {artist, album});
                 if (data.success) {
                     btn.textContent = '⏳ Searching...';
                     btn.style.borderColor = 'var(--accent)';
@@ -1274,29 +1299,27 @@
 
         async function syncLidarr() {
             showToast('Syncing with Lidarr library...');
-            const res = await fetch('/api/sync-lidarr', {method: 'POST'});
-            const data = await res.json();
-            showToast(data.message);
-            setTimeout(() => location.reload(), 1500);
+            try {
+                const data = await apiPost('/api/sync-lidarr');
+                showToast((data.success ? '✓ ' : '❌ ') + (data.message || 'Lidarr sync finished'));
+                if (data.success) setTimeout(() => location.reload(), 1500);
+            } catch (e) {
+                showToast('❌ Network error syncing Lidarr');
+            }
         }
 
         async function discoverMoreArtists(btn) {
             if (btn) { btn.disabled = true; btn.textContent = '🔭 Discovering...'; }
             showToast('🔭 Analyzing Tautulli history & finding new stepping-stone albums...');
             try {
-                const res = await fetch('/api/discover-more', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({count: 6})
-                });
-                const data = await res.json();
+                const data = await apiPost('/api/discover-more', {count: 6});
                 if (data.success) {
                     showToast(`✓ ${data.message}`);
                     if (data.added_count > 0) {
                         setTimeout(() => location.reload(), 1500);
                     }
                 } else {
-                    showToast('❌ Error discovering new artists');
+                    showToast('❌ ' + (data.message || 'Error discovering new artists'));
                 }
             } catch (e) {
                 showToast('❌ Network error during discovery');
@@ -1308,12 +1331,7 @@
         async function addSingleToPlaylist(ratingKey, title) {
             showToast('Adding ' + title + ' to Plex playlist...');
             try {
-                const res = await fetch('/api/vault/add-track', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({rating_key: ratingKey})
-                });
-                const data = await res.json();
+                const data = await apiPost('/api/vault/add-track', {rating_key: ratingKey});
                 if (data.success) {
                     showToast(`✓ Added ${title} (Playlist now has ${data.leafCount} tracks)`);
                 } else {

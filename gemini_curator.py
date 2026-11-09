@@ -400,6 +400,24 @@ Candidates:
             liner = _clean_str(res.get("liner_notes"))
             if liner:
                 log.info(f"Liner notes: \"{liner}\"")
+
+            # If LLM returned fewer tracks than requested, top up from remaining candidates
+            if len(sequenced) < min(target_count, len(candidate_tracks)):
+                by_artist: Dict[str, List[dict]] = {}
+                for t in candidate_tracks:
+                    if str(t["ratingKey"]) not in used:
+                        by_artist.setdefault(t["artist"], []).append(t)
+                while len(sequenced) < min(target_count, len(candidate_tracks)) and by_artist:
+                    for art in list(by_artist.keys()):
+                        if by_artist[art]:
+                            t = by_artist[art].pop(0)
+                            sequenced.append(t)
+                            used.add(str(t["ratingKey"]))
+                        else:
+                            del by_artist[art]
+                        if len(sequenced) >= target_count:
+                            break
+
             return sequenced[:max(target_count, 1)]
 
     # Fallback if LLM unavailable: balanced round-robin across artists
@@ -679,8 +697,8 @@ Return JSON:
             sequenced_keys.append(k)
     sequenced_keys = sequenced_keys[:target_count]
 
-    # Fallback: balanced round-robin if LLM returned too few keys
-    if len(sequenced_keys) < min(8, len(candidates)):
+    # Top up if LLM returned fewer tracks than requested
+    if len(sequenced_keys) < min(target_count, len(candidates)):
         for c in candidates:
             if c["key"] not in sequenced_keys:
                 sequenced_keys.append(c["key"])

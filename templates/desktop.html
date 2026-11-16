@@ -734,6 +734,35 @@
             </div>
         </div>
 
+        <!-- 🏡 Home Automation Stations Banner -->
+        <div class="sync-hero-banner" style="background: linear-gradient(135deg, #1b2234 0%, #131926 100%); border-color: #2e3a54; margin-bottom: 1.5rem;">
+            <div class="hero-info">
+                <h2><span>🏡</span> 5 Home Routine Stations (Auto-Refreshes Mon 6am)</h2>
+                <p>Dedicated home automation playlists: Wake Up, Morning Coffee, Coming Home, Family Dinner & Bedtime.</p>
+            </div>
+            <div class="hero-actions">
+                <button class="btn btn-accent" id="btn-refresh-home-all" onclick="deployAllHomeStations(this)" style="background: #38bdf8; color: #082f49;">
+                    ⚡ Refresh All 5 Home Stations
+                </button>
+            </div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.85rem; margin-bottom: 2rem;">
+            {% for skey, sdef in home_stations.items() %}
+            <div style="background: #131722; border: 1px solid var(--border); border-radius: 12px; padding: 0.9rem 1.1rem; display: flex; flex-direction: column; justify-content: space-between; gap: 0.6rem;">
+                <div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem;">
+                        <span style="font-weight: 700; font-size: 0.95rem; color: #fff;">{{ sdef.icon }} {{ sdef.name }}</span>
+                        <span style="font-size: 0.72rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;">{{ sdef.target_count }} tracks</span>
+                    </div>
+                    <p style="font-size: 0.78rem; color: var(--text-muted); line-height: 1.35;">{{ sdef.description }}</p>
+                </div>
+                <button class="btn btn-outline" style="font-size: 0.76rem; padding: 0.4rem 0.6rem; width: 100%; justify-content: center;" onclick="deploySingleHomeStation('{{ skey }}', this)">
+                    🔄 Refresh {{ sdef.name }}
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+
         <!-- 🚀 Hero Playlist Dispatcher -->
         <div class="sync-hero-banner">
             <div class="hero-info">
@@ -1233,6 +1262,41 @@
                 tr.append(tdArt, tdAlb, tdYear, tdGen, tdAct);
                 tbody.appendChild(tr);
             });
+        }
+
+        async function deployAllHomeStations(btn) {
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Curating 5 Home Stations...'; }
+            showToast('🏡 Refreshing all 5 Home Routine Stations in Plexamp…');
+            try {
+                const data = await apiPost('/api/home-stations/generate-all');
+                if (data.success) {
+                    showToast(`✓ All ${data.stations.length} Home Routine Stations updated in Plexamp!`);
+                } else {
+                    showToast('❌ ' + (data.message || 'Error updating home stations'));
+                }
+            } catch (e) {
+                showToast('❌ Error updating home stations: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = '⚡ Refresh All 5 Home Stations'; }
+            }
+        }
+
+        async function deploySingleHomeStation(key, btn) {
+            const orig = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Curating…'; }
+            showToast(`🏡 Curating Home Station: ${key}…`);
+            try {
+                const data = await apiPost(`/api/home-stations/generate/${key}`);
+                if (data.success) {
+                    showToast(`✓ ${data.message}`);
+                } else {
+                    showToast('❌ ' + (data.message || 'Error updating station'));
+                }
+            } catch (e) {
+                showToast('❌ Error updating station: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = orig; }
+            }
         }
 
         async function deployAllPlaylists(btn) {

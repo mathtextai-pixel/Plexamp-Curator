@@ -43,6 +43,7 @@ _DEFAULTS = {
     # Scheduler
     "RUN_SCHEDULER": "1",
     "WEEKLY_REFRESH_CRON": "0 9 * * mon",   # minute hour day month day_of_week
+    "WEEKLY_HOME_STATIONS_CRON": "0 6 * * mon",  # Home stations refresh Mon 06:00
     "NIGHTLY_REINDEX_CRON": "30 3 * * *",
     "WEEKLY_DISCOVERY_CRON": "30 9 * * mon",
     "DISCOVERY_PICKS_PER_WEEK": "6",

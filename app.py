@@ -28,10 +28,12 @@ import discovery_engine
 import gemini_curator
 import jobs
 import weekly_refresh
+import home_stations
 from config import CONFIG, get_int, public_config
 from cron import CronError, CronSchedule
 from locks import (
     DISCOVERY_JOB_LOCK,
+    HOME_STATIONS_JOB_LOCK,
     LIDARR_SYNC_JOB_LOCK,
     PROMPT_PLAYLIST_JOB_LOCK,
     REFRESH_JOB_LOCK,
@@ -240,6 +242,7 @@ def index():
             plex_machine_id=machine_id,
             library_track_count=track_count,
             llm_status=llm_status,
+            home_stations=home_stations.HOME_STATION_DEFINITIONS,
         )
 
     recs = discovery_engine.get_all_recommendations()
@@ -249,6 +252,7 @@ def index():
         recommendations=recs,
         channel_counts=channel_counts,
         channel_defs=_public_channel_defs(),
+        home_stations=home_stations.HOME_STATION_DEFINITIONS,
         config=pub_cfg,
         plex_machine_id=machine_id,
         library_track_count=track_count,
@@ -453,6 +457,42 @@ Return JSON:
     return _start_job("surprise-me", work, SURPRISE_JOB_LOCK, "A Surprise Me pick")
 
 
+@app.route("/api/home-stations", methods=["GET"])
+def api_home_stations():
+    return jsonify(home_stations.HOME_STATION_DEFINITIONS)
+
+
+@app.route("/api/home-stations/generate-all", methods=["POST"])
+def api_home_stations_generate_all():
+    def work(progress):
+        stations = home_stations.generate_all_home_stations(progress=progress)
+        return 200, {
+            "success": True,
+            "stations": stations,
+            "message": f"Updated {len(stations)} Home Station playlists in Plex!",
+        }
+
+    return _start_job("home-stations-all", work, HOME_STATIONS_JOB_LOCK, "A home stations refresh")
+
+
+@app.route("/api/home-stations/generate/<station_key>", methods=["POST"])
+def api_home_stations_generate_single(station_key):
+    if station_key not in home_stations.HOME_STATION_DEFINITIONS:
+        return jsonify({"success": False, "message": "Home station not found"}), 404
+
+    def work(progress):
+        res = home_stations.generate_home_station_playlist(station_key, progress=progress)
+        if not res:
+            return 500, {"success": False, "message": "Could not update home station playlist (see server log)"}
+        return 200, {
+            "success": True,
+            "station": res,
+            "message": f"Updated '{res['title']}' in Plex ({res['track_count']} tracks)!",
+        }
+
+    return _start_job(f"home-station-{station_key}", work, HOME_STATIONS_JOB_LOCK, "A home station refresh")
+
+
 @app.route("/api/playlists/generate-all", methods=["POST"])
 def api_generate_all():
     def work(progress):
@@ -566,11 +606,21 @@ def _scheduled_discovery() -> None:
         log.warning("Skipped discovery crawl: another crawl held the lock for 15 min.")
 
 
+def _scheduled_home_stations() -> None:
+    try:
+        with file_lock(HOME_STATIONS_JOB_LOCK, timeout=30 * 60):
+            log.info("Starting scheduled Home Stations refresh…")
+            home_stations.generate_all_home_stations()
+    except LockBusy:
+        log.warning("Skipped scheduled Home Stations refresh: another refresh held the lock for 30 min.")
+
+
 def _load_schedule() -> List[Tuple[str, CronSchedule, Callable[[], None]]]:
     """Build (name, schedule, fn) for each configured task; set a *_CRON value to 'off' to disable it."""
     tasks = []
     for key, name, fn in (
         ("NIGHTLY_REINDEX_CRON", "library re-index", _scheduled_reindex),
+        ("WEEKLY_HOME_STATIONS_CRON", "home stations refresh", _scheduled_home_stations),
         ("WEEKLY_REFRESH_CRON", "channel & vault playlist refresh", _scheduled_refresh),
         ("WEEKLY_DISCOVERY_CRON", "discovery crawl", _scheduled_discovery),
     ):

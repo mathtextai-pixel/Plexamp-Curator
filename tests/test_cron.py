@@ -51,6 +51,7 @@ def test_scheduler_skips_disabled_and_invalid_entries(monkeypatch):
     import app
 
     monkeypatch.setitem(app.CONFIG, "NIGHTLY_REINDEX_CRON", "30 3 * * *")
+    monkeypatch.setitem(app.CONFIG, "WEEKLY_HOME_STATIONS_CRON", "off")
     monkeypatch.setitem(app.CONFIG, "WEEKLY_REFRESH_CRON", "off")
     monkeypatch.setitem(app.CONFIG, "WEEKLY_DISCOVERY_CRON", "every monday")
     names = [name for name, _schedule, _fn in app._load_schedule()]

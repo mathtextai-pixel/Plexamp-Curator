@@ -94,6 +94,7 @@ def file_lock(name: str, timeout: Optional[float] = None, poll: float = 0.25) ->
 
 # Job-level locks shared by the API endpoints and the scheduler.
 REFRESH_JOB_LOCK = "job:refresh-playlists"   # channel / vault playlist refreshes
+HOME_STATIONS_JOB_LOCK = "job:home-stations" # home routine stations
 REINDEX_JOB_LOCK = "job:reindex"
 LIDARR_SYNC_JOB_LOCK = "job:lidarr-sync"
 DISCOVERY_JOB_LOCK = "job:discovery"

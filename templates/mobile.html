@@ -478,6 +478,12 @@
                 <span class="tile-title">Refresh 5 Channels</span>
                 <span class="tile-desc">Update all taste crates in-place with fresh flow</span>
             </button>
+
+            <button type="button" class="tile-btn" onclick="triggerRefreshHomeStations(this)" style="grid-column: span 2; border-color: #38bdf8;">
+                <span class="tile-icon" aria-hidden="true">🏡</span>
+                <span class="tile-title" style="color: #38bdf8;">Refresh 5 Home Stations</span>
+                <span class="tile-desc">Wake Up, Coffee, Coming Home, Dinner, Bedtime (Auto-Mon 6am)</span>
+            </button>
         </div>
 
         <div style="text-align:center; margin-top:auto; padding-top:1rem;">
@@ -679,6 +685,23 @@
                     showToast(`✓ All ${data.playlists.length} channel mixtapes updated in Plexamp!`);
                 } else {
                     showToast('❌ ' + (data.message || 'Error refreshing channels'));
+                }
+            } catch (err) {
+                showToast('❌ Network error');
+            } finally {
+                if (tile) tile.disabled = false;
+            }
+        }
+
+        async function triggerRefreshHomeStations(tile) {
+            if (tile) tile.disabled = true;
+            showToast('🏡 Refreshing all 5 Home Routine Stations...');
+            try {
+                const data = await apiPost('/api/home-stations/generate-all');
+                if (data.success) {
+                    showToast(`✓ All ${data.stations.length} Home Routine Stations updated in Plexamp!`);
+                } else {
+                    showToast('❌ ' + (data.message || 'Error updating home stations'));
                 }
             } catch (err) {
                 showToast('❌ Network error');

@@ -25,3 +25,25 @@ services:
       - ./data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  beets-importer:
+    build: ./beets
+    image: beets-importer:latest
+    container_name: beets-importer
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PLEX_URL=http://host.docker.internal:32400
+      - CRATE_URL=http://crate-excavator:5050
+      - MUSIC_SECTION_ID=${MUSIC_SECTION_ID:-2}
+      - TZ=${TZ:-America/New_York}
+      - AUTO_IMPORT=${BEETS_AUTO_IMPORT:-0}
+      - SETTLE_SECONDS=60
+      - POLL_INTERVAL=20
+    volumes:
+      - "/Volumes/Storage Space/Music:/inbox"
+      - "/Volumes/Storage Space/data/media/Music:/music"
+      - "./data/beets:/beets-data"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -1,0 +1,54 @@
+directory: /music
+library: /beets-data/beets.db
+
+plugins: musicbrainz fetchart embedart scrub inline deezer chroma
+
+import:
+  move: yes
+  copy: no
+  write: yes
+  autotag: yes
+  quiet: yes
+  quiet_fallback: skip
+  timid: no
+  resume: no
+  incremental: no
+  duplicate_action: skip
+  log: /beets-data/import.log
+
+match:
+  strong_rec_thresh: 0.12
+  preferred:
+    countries: ['US', 'GB|UK', 'XW']
+    media: ['Digital Media|File', 'CD']
+    original_year: yes
+
+fetchart:
+  auto: yes
+  sources:
+    - filesystem
+    - coverart
+    - itunes
+    - amazon
+    - albumart
+
+embedart:
+  auto: yes
+  ifempty: no
+  maxwidth: 1200
+
+item_fields:
+  multidisc: 1 if disctotal > 1 else 0
+
+paths:
+  default: $albumartist/$album%if{$year, ($year)}/$albumartist - $album - %if{$multidisc,$disc-}$track - $title
+  comp: Various Artists/$album%if{$year, ($year)}/$artist - $album - %if{$multidisc,$disc-}$track - $title
+  singleton: Non-Album/$artist/$artist - $title
+
+replace:
+  '[\\/]': _
+  '^\.': _
+  '[\x00-\x1f]': _
+  '[<>:"\?\*\|]': _
+  '\.$': _
+  '\s+$': ''

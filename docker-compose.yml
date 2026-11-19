@@ -39,7 +39,7 @@ services:
       - MUSIC_SECTION_ID=${MUSIC_SECTION_ID:-2}
       - TZ=${TZ:-America/New_York}
       - AUTO_IMPORT=${BEETS_AUTO_IMPORT:-0}
-      - SETTLE_SECONDS=60
+      - SETTLE_SECONDS=120
       - POLL_INTERVAL=20
     volumes:
       - "/Volumes/Storage Space/Music:/inbox"
